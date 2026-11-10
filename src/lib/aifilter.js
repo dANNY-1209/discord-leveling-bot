@@ -31,6 +31,7 @@ const NEGATION_RE = /禁止|反対|反對|拒否|拒絕|お断り|不使用|未�
 const NEGATION_WINDOW = 12;
 
 // AI 創作者的自介寫法：「3D+AI NSFW animator」「AI artist」「animator using AI」「made with AI」
+// 以及常見的高產量動畫／圖片集寫法（很多 AI 創作者不會直接寫 AI）
 const AI_ROLE = '(?:animat\\w*|artists?|art|artworks?|creators?|creations?|generated|generator|hentai|nsfw|waifus?|girls?|images?|illustrat\\w*|videos?|porn|lewds?|render\\w*|anime)';
 const AI_BIO_PATTERNS = [
   /\b\d\s?d\s*[+&]\s*ai\b/g,
@@ -38,6 +39,15 @@ const AI_BIO_PATTERNS = [
   new RegExp(`\\b${AI_ROLE}\\s*(?:using|with|by|powered by|\\+|&)\\s*ai\\b`, 'g'),
   /\b(?:made|created|generated|assisted|powered)\s+(?:with|by|using)\s+ai\b/g,
   /(?<![.\w])ai[\s-]*(?:assisted|powered|made|created)\b/g,
+  // 高產量動畫／圖片集（kiityysfw 類型）
+  /\bsfw\s*animations?\b/gi,
+  /\bnsfw\s*(?:images?\s*&?\s*)?animations?\b/gi,
+  /\bimages?\s*&\s*animations?\b/gi,
+  /\banimation\s*preview\b/gi,
+  /\bfull\s*(?:uncensored\s*)?set\b/gi,
+  /\bsets?\s*available\b/gi,
+  // 常見 AI 工具（即使沒寫 AI 也高度可疑）
+  /\b(?:novelai|midjourney|niji(?:journey)?|pixai|stable\s*diffusion|comfyui|automatic1111|a1111)\b/gi,
 ];
 // 單獨出現的 AI：太短不足以刪除，只當疑似（.ai 網域不算）
 const BARE_AI_RE = /(?<![.\w])ai\b/g;
@@ -65,7 +75,7 @@ export function isCaptionTemplate(text) {
   return CAPTION_TEMPLATE_RE.test(String(text ?? '').replace(/https?:\/\/\S+/g, '').trim());
 }
 
-/** 簡介與網站欄位提到的同一人身分：Patreon，以及標明是小號的 X 帳號 */
+/** 簡介與網站欄位提到的同一人身分：Patreon，以及標明是小號／配對的 X 帳號 */
 export function linkedIdentities(bio, website = '') {
   const text = `${bio ?? ''}\n${website ?? ''}`;
   const out = new Set();
@@ -73,9 +83,19 @@ export function linkedIdentities(bio, website = '') {
     const slug = m[1].toLowerCase();
     if (!PATREON_RESERVED.has(slug)) out.add(`patreon:${slug}`);
   }
-  // 只認標明小號的：一般的「art by x.com/朋友」不能連坐
-  const alt = /(?:\bn?sfw\b|\bacc\b|\baccount\b|\balt\b|\bsub\b|サブ|裏垢|本垢|副)[^\n]{0,20}?(?:(?:x|twitter)\.com\/|@)(\w{1,15})/gi;
+  // 擴大連座：SFW/NSFW 配對、animations、@mention 附近
+  const alt = /(?:\bn?sfw\b|\bnsfw\b|\bacc\b|\baccount\b|\balt\b|\bsub\b|animations?|サブ|裏垢|本垢|副|promo)[^\n]{0,40}?(?:(?:x|twitter)\.com\/|@)(\w{1,15})/gi;
   for (const m of text.matchAll(alt)) out.add(`x:${m[1].toLowerCase()}`);
+  // 任何 @handle 如果在同一行有 SFW/NSFW/animations 也連
+  const mentionNear = /@[a-zA-Z0-9_]{1,15}/g;
+  for (const m of text.matchAll(mentionNear)) {
+    const lineStart = text.lastIndexOf('\n', m.index) + 1;
+    const lineEnd = text.indexOf('\n', m.index);
+    const line = text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+    if (/\b(?:n?sfw|animations?|images?\s*&\s*animations?)\b/i.test(line)) {
+      out.add(`x:${m[0].slice(1).toLowerCase()}`);
+    }
+  }
   return [...out];
 }
 
@@ -327,6 +347,9 @@ async function evaluateXStatus(target, rules) {
   for (const tag of extractHashtags(tweet.text)) {
     if (matchKeyword(tag, rules.keywords)) return HIT(creator, `推文的 tag「#${tag}」`);
   }
+  // 推文本身的高產量／AI工具寫法也算（不只看 bio）
+  const tweetPhrase = firstUnnegated(tweet.text, AI_BIO_PATTERNS);
+  if (tweetPhrase) return HIT(creator, `推文寫著「${tweetPhrase}」`);
   const verdict = evaluateXBio(creator, tweet, rules);
   if (!verdict.hit && !verdict.suspect && isCaptionTemplate(tweet.text)) {
     return SUSPECT(creator, '推文是「角色 - 作品 + sfw／nsfw」的固定文案');
