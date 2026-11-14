@@ -362,18 +362,24 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 | tag 連結 | `pixiv.net/tags/…`、`x.com/hashtag/…` 的 tag 含關鍵字 |
 | pixiv 作品 | 封鎖名單；pixiv 官方 `aiType = 2`（AI 生成）；作品 tag 含關鍵字；或作者符合下一列 |
 | pixiv 作者頁 | 封鎖名單；公開的最近作品至少 3 件、其中至少 60% 標記 AI（含 `pixiv.me` 短網址） |
-| X 推文 | 封鎖名單；推文的 `#tag`；或作者簡介符合下一列 |
-| X 個人頁 | 封鎖名單；簡介含關鍵字；簡介有 AI 創作者寫法（`3D+AI`、`AI artist`、`AI NSFW animator`、`animator using AI`、`made with AI`）；或簡介連到封鎖名單上的 Patreon／標明的小號 |
+| X 推文 | 封鎖名單；推文的 `#tag` 或 AI 創作者寫法；或作者簡介／顯示名稱符合下一列 |
+| X 個人頁 | 封鎖名單；簡介／顯示名稱含關鍵字或 AI 創作者寫法（`3D+AI`、`AI artist`、`AI NSFW animator`、`animator using AI`、`made with AI`）；或簡介連到封鎖名單上的 Patreon／標明的小號 |
 | Patreon 連結 | 只看封鎖名單 |
 
-**疑似（只發到紀錄頻道，永遠不刪）**：X 簡介單獨提到 AI，或推文是「角色 - 作品」加一行 `sfw`／`nsfw` 的固定文案。
+**疑似（只發到紀錄頻道，永遠不刪）**：X 簡介／顯示名稱單獨提到 AI、帳號有以底線分隔的 `AI` 標記（例如 `Aisora_AI`），或推文是「角色 - 作品」加一行 `sfw`／`nsfw` 的固定文案。
 手繪作者也可能這樣寫，所以由管理員判斷，要擋就 `/ai-filter creator action:封鎖`。沒設紀錄頻道時只寫 log。
 
 用 `/ai-filter creator` 封鎖 X 帳號時，簡介裡的 Patreon 與標明的小號（`SFW Acc: x.com/…` 這種）會一併封鎖，
 回覆會列出來；一般提到別人的連結不會連坐。
 
 `vxtwitter`／`fxtwitter`／`fixupx` 等鏡像站與去重共用同一份網域清單。關鍵字比對不分大小寫、全半形，
-忽略空格／底線／連字號；**旁邊有否定字眼的不算**（`AIイラスト禁止`、`No AI art`），避免誤傷反 AI 的創作者。
+忽略空格／底線／連字號；**禁止使用／訓練 AI 的聲明不當成 AI 證據，也不因該聲明發疑似通知**。
+支援中英日文，例如 `AI使用禁止`、`請不要把我的任何作品拿去餵低能AI`、`AI学習禁止`、`Do not use my artwork to train AI`。
+也辨識 `AI-free artist`，以及共用否定語的並列項目，例如 `No #AIart or #AIgenerated`、`AIイラスト、AI生成の学習禁止`。
+否定只影響同一句／子句，訊息與推文的 `#tag` 也保留原句上下文；若另一句明確寫 `AI artist` 或使用 `#AIart`，仍會命中。
+這是文字規則判斷；只有 `_AI` 帳號標記時只報疑似，已確認的 AI 創作者可用 `/ai-filter creator action:封鎖 target:@Aisora_AI` 加入名單。
+
+執行 `npm test` 可驗證保護聲明、混合 AI 創作宣告、hashtag 上下文、X 名稱與帳號標記，以及刪除／放行流程；測試使用記憶體資料庫與模擬查詢。
 
 ### 限制
 
