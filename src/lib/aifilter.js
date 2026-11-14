@@ -26,9 +26,19 @@ const USER_AGENT = 'discord-leveling-bot (moderation link check)';
 
 // ---------- tag／關鍵字比對 ----------
 
-// 寫在 tag 旁邊的否定字眼：「AIイラスト禁止」「No AI art」是反 AI，不能當成 AI 創作者
-const NEGATION_RE = /禁止|反対|反對|拒否|拒絕|お断り|不使用|未使用|不用|してません|しません|ではない|ではありません|じゃない|不是|沒有|没有|非ai|無ai|無斷|無断|\bng\b|\b(?:no|non|not|anti|ban|without|never|hate|dont|don't)\b[\s-]*(?:\S+\s+)?ai|\bnoai|\bnonai|\bantiai|\bnot[\s-]*ai|ai[\s-]*free|hater|\bsucks?\b|theft|thie(?:f|ves)|\bstop\b|against|learning|training|prohibit|forbid/;
-const NEGATION_WINDOW = 12;
+// 否定只作用於同一句／子句，不能讓「禁止訓練」蓋掉另一句「我使用 AI 創作」。
+const CLAUSE_BREAK_RE = /[.!?。！？;；\n|]+|\s+\/\s+|\b(?:but|however|yet)\b|但是|不過|不过|可是|しかし|ただし|でも|[,，](?=\s*(?:i\b|we\b|我|本人))/;
+// 長聲明從禁止語開始生效，例如「請不要把我的任何作品拿去餵低能AI」。
+const NEGATION_PREFIX_RE = /(?:禁止|严禁|嚴禁|請勿|请勿|不要|不得|不可|不准|不允許|不允许|拒絕|拒绝|拒否|反對|反对|反対|\b(?:do\s+not|don['’]?t|must\s+not|may\s+not|cannot|can['’]t|prohibit\w*|forbid\w*|disallow\w*|ban(?:ned)?|no\s+(?:use|training|permission|consent))\b)[\s\S]*$/;
+const NEGATION_BEFORE_RE = /(?:不使用|未使用|不用|不是|沒有|没有|非|無|无|\b(?:no|non|not|anti|without|never|hate|against|stop))[\s_#-]*(?:(?:any|generative)[\s_-]+)?$/;
+// 後置否定只接受用途／訓練等連接語，不把前面的獨立 AI 創作者宣告一併放行。
+const NEGATION_AFTER_RE = /^(?:[\s_#・/、へのをにはで的之-]|使用|利用|学習|學習|学习|訓練|训练|生成|イラスト|アート|絵|画像|一切|用於|用于|\b(?:art|artwork|images?|content|use|usage|for|machine|learning|training|is|are|strictly|absolutely)\b)*(?:禁止|不可|拒否|お断り|不使用|未使用|使用しません|使いません|してません|しません|ではない|ではありません|じゃない|\b(?:ng|prohibit\w*|forbid\w*|banned|not\s+allowed|free|hater|sucks?|theft|thie(?:f|ves))\b)/;
+
+function isNegated(text, index, length) {
+  const before = fold(text.slice(0, index)).split(CLAUSE_BREAK_RE).at(-1);
+  const after = fold(text.slice(index + length)).split(CLAUSE_BREAK_RE)[0];
+  return NEGATION_PREFIX_RE.test(before) || NEGATION_BEFORE_RE.test(before) || NEGATION_AFTER_RE.test(after);
+}
 
 // AI 創作者的自介寫法：「3D+AI NSFW animator」「AI artist」「animator using AI」「made with AI」
 // 以及常見的高產量動畫／圖片集寫法（很多 AI 創作者不會直接寫 AI）
@@ -58,8 +68,7 @@ function firstUnnegated(text, patterns) {
   const hay = fold(text);
   for (const re of patterns) {
     for (const m of hay.matchAll(re)) {
-      const around = hay.slice(Math.max(0, m.index - NEGATION_WINDOW), m.index + m[0].length + NEGATION_WINDOW);
-      if (!NEGATION_RE.test(around)) return m[0];
+      if (!isNegated(hay, m.index, m[0].length)) return m[0];
     }
   }
   return null;
@@ -107,25 +116,35 @@ function keywordRegex(keyword) {
   return chars.length ? new RegExp(chars.join('[\\s_-]*'), 'g') : null;
 }
 
-/** 命中哪個關鍵字；空格／底線／連字號差異不計，旁邊有否定字眼的不算 */
+/** 命中哪個關鍵字；空格／底線／連字號差異不計，禁止使用／訓練的聲明不算 */
 export function matchKeyword(text, keywords) {
   const hay = fold(text);
   for (const keyword of keywords) {
     const re = keywordRegex(keyword);
     if (!re) continue;
     for (const m of hay.matchAll(re)) {
-      const around = hay.slice(Math.max(0, m.index - NEGATION_WINDOW), m.index + m[0].length + NEGATION_WINDOW);
-      if (!NEGATION_RE.test(around)) return keyword;
+      if (!isNegated(hay, m.index, m[0].length)) return keyword;
     }
   }
   return null;
 }
 
+const HASHTAG_RE = /(?:^|[^\p{L}\p{N}_&/])[#＃]([\p{L}\p{M}\p{N}_]+)/gu;
+
 /** 文字裡的 #tag。網址的 #fragment 與 Discord 標題語法（# 後有空白）都不算 */
 export function extractHashtags(text) {
-  const tags = [];
-  for (const m of String(text ?? '').matchAll(/(?:^|[^\p{L}\p{N}_&/])[#＃]([\p{L}\p{M}\p{N}_]+)/gu)) tags.push(m[1]);
-  return tags;
+  return [...String(text ?? '').matchAll(HASHTAG_RE)].map((m) => m[1]);
+}
+
+// 抽出 tag 後仍保留原句，避免「禁止用於 #AIart 訓練」失去否定上下文。
+function matchHashtagKeyword(text, keywords) {
+  const content = String(text ?? '');
+  for (const m of content.matchAll(HASHTAG_RE)) {
+    const tag = m[1];
+    const index = m.index + m[0].length - tag.length;
+    if (matchKeyword(tag, keywords) && !isNegated(content, index, tag.length)) return tag;
+  }
+  return null;
 }
 
 // ---------- 連結解析 ----------
@@ -258,6 +277,7 @@ function xTweet(id) {
     return {
       text: j.tweet.text ?? '',
       handle: String(j.tweet.author?.screen_name ?? '').toLowerCase() || null,
+      name: j.tweet.author?.name ?? '',
       bio: j.tweet.author?.description ?? '',
       website: j.tweet.author?.website?.url ?? '',
     };
@@ -268,7 +288,7 @@ function xUser(handle) {
   return cached(`x-user:${handle}`, async () => {
     const j = await fetchJson(`https://api.fxtwitter.com/${encodeURIComponent(handle)}`);
     if (j?.code !== 200 || !j.user) return null;
-    return { bio: j.user.description ?? '', website: j.user.website?.url ?? '' };
+    return { name: j.user.name ?? '', bio: j.user.description ?? '', website: j.user.website?.url ?? '' };
   });
 }
 
@@ -319,14 +339,18 @@ async function evaluatePixivWork(id, rules) {
   return evaluatePixivUser(work.userId, rules);
 }
 
-function evaluateXBio(creator, { bio, website }, rules) {
-  const keyword = matchKeyword(bio, rules.keywords);
-  if (keyword) return HIT(creator, `X 個人簡介提到「${keyword}」`);
-  const phrase = matchAiBio(bio);
-  if (phrase) return HIT(creator, `X 個人簡介寫著「${phrase}」`);
+function evaluateXBio(creator, { bio, website, name = '' }, rules) {
+  for (const [label, text] of [['個人簡介', bio], ['顯示名稱', name]]) {
+    const keyword = matchKeyword(text, rules.keywords);
+    if (keyword) return HIT(creator, `X ${label}提到「${keyword}」`);
+    const phrase = matchAiBio(text);
+    if (phrase) return HIT(creator, `X ${label}寫著「${phrase}」`);
+  }
   const linked = linkedIdentities(bio, website).find((id) => rules.blocked.has(id));
   if (linked) return HIT(creator, `X 個人簡介連到封鎖名單上的 ${linked}`);
-  if (firstUnnegated(bio, [BARE_AI_RE])) return SUSPECT(creator, 'X 個人簡介提到 AI');
+  if (firstUnnegated(`${name}\n${bio}`, [BARE_AI_RE])) return SUSPECT(creator, 'X 顯示名稱或個人簡介提到 AI');
+  // _AI 是待確認的帳號標記；不比對普通名字裡的 ai，也不足以自動刪除。
+  if (/(?:^|_)ai(?:_|$)/i.test(creator?.slice(2) ?? '')) return SUSPECT(creator, 'X 帳號名稱有獨立 AI 標記');
   return NOT_AI(creator);
 }
 
@@ -344,9 +368,8 @@ async function evaluateXStatus(target, rules) {
     const listed = listVerdict(creator, rules);
     if (listed) return listed;
   }
-  for (const tag of extractHashtags(tweet.text)) {
-    if (matchKeyword(tag, rules.keywords)) return HIT(creator, `推文的 tag「#${tag}」`);
-  }
+  const tag = matchHashtagKeyword(tweet.text, rules.keywords);
+  if (tag) return HIT(creator, `推文的 tag「#${tag}」`);
   // 推文本身的高產量／AI工具寫法也算（不只看 bio）
   const tweetPhrase = firstUnnegated(tweet.text, AI_BIO_PATTERNS);
   if (tweetPhrase) return HIT(creator, `推文寫著「${tweetPhrase}」`);
@@ -398,12 +421,11 @@ export async function evaluateText(guildId, text) {
   const rules = loadRules(guildId);
   const results = [];
 
-  for (const tag of extractHashtags(text)) {
-    if (matchKeyword(tag, rules.keywords)) {
-      const verdict = { source: `#${tag}`, ...HIT(null, `訊息裡的 tag「#${tag}」`) };
-      results.push(verdict);
-      return { hit: verdict, results };
-    }
+  const tag = matchHashtagKeyword(text, rules.keywords);
+  if (tag) {
+    const verdict = { source: `#${tag}`, ...HIT(null, `訊息裡的 tag「#${tag}」`) };
+    results.push(verdict);
+    return { hit: verdict, results };
   }
 
   const targets = [];
