@@ -375,6 +375,7 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 `vxtwitter`／`fxtwitter`／`fixupx` 等鏡像站與去重共用同一份網域清單。關鍵字比對不分大小寫、全半形，
 忽略空格／底線／連字號；**禁止使用／訓練 AI 的聲明不當成 AI 證據，也不因該聲明發疑似通知**。
 支援中英日文，例如 `AI使用禁止`、`請不要把我的任何作品拿去餵低能AI`、`AI学習禁止`、`Do not use my artwork to train AI`。
+也辨識 `AI-free artist`，以及共用否定語的並列項目，例如 `No #AIart or #AIgenerated`、`AIイラスト、AI生成の学習禁止`。
 否定只影響同一句／子句，訊息與推文的 `#tag` 也保留原句上下文；若另一句明確寫 `AI artist` 或使用 `#AIart`，仍會命中。
 這是文字規則判斷；只有 `_AI` 帳號標記時只報疑似，已確認的 AI 創作者可用 `/ai-filter creator action:封鎖 target:@Aisora_AI` 加入名單。
 

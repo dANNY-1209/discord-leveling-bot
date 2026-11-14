@@ -35,6 +35,13 @@ for (const text of [
   'AI art is strictly prohibited.',
   'No AI art / #NoAIart / anti-AI artist / AI-free',
   'Ｎｏ ＡＩ ａｒｔ',
+  'AI-free artist',
+  'AI hater artist',
+  '3D+AI-free animator',
+  'No #AIart or #AIgenerated',
+  'No Midjourney or Stable Diffusion',
+  'AIイラスト、AI生成の学習禁止',
+  'AI artists are not welcome here',
 ]) {
   test(`protection notice is neither AI evidence nor a warning: ${text}`, async (t) => {
     assert.equal(matchKeyword(text, [...DEFAULT_AI_KEYWORDS, 'AI']), null);
@@ -57,6 +64,9 @@ for (const text of [
   'No AI training on my works, but I create AI art.',
   'AI学習禁止\nAIイラストを制作しています',
   'AI学習禁止 / AIイラストを制作しています',
+  'No AI art, handmade and AI artist commissions available',
+  'No AI art or Midjourney; AI artist',
+  'AI artist, no AI training',
 ]) {
   test(`independent AI creation evidence still matches: ${text}`, async (t) => {
     const verdict = await evaluateTarget(mockX(t, { bio: text }), rules());
@@ -68,6 +78,8 @@ for (const text of [
   '禁止將我的作品用於 #AI繪圖 或 #AI生成 的訓練',
   'Do not use my illustrations to train #AIart models.',
   '私の作品の #AIイラスト 学習・利用は禁止です',
+  'No #AIart or #AIgenerated',
+  '#AIイラスト、#AI生成の学習禁止',
 ]) {
   test(`hashtag retains its protection context: ${text}`, async (t) => {
     assert.equal((await evaluateText('tags', text)).hit, null);

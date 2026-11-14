@@ -31,18 +31,28 @@ const CLAUSE_BREAK_RE = /[.!?。！？;；\n|]+|\s+\/\s+|\b(?:but|however|yet)\b
 // 長聲明從禁止語開始生效，例如「請不要把我的任何作品拿去餵低能AI」。
 const NEGATION_PREFIX_RE = /(?:禁止|严禁|嚴禁|請勿|请勿|不要|不得|不可|不准|不允許|不允许|拒絕|拒绝|拒否|反對|反对|反対|\b(?:do\s+not|don['’]?t|must\s+not|may\s+not|cannot|can['’]t|prohibit\w*|forbid\w*|disallow\w*|ban(?:ned)?|no\s+(?:use|training|permission|consent))\b)[\s\S]*$/;
 const NEGATION_BEFORE_RE = /(?:不使用|未使用|不用|不是|沒有|没有|非|無|无|\b(?:no|non|not|anti|without|never|hate|against|stop))[\s_#-]*(?:(?:any|generative)[\s_-]+)?$/;
+const NEGATION_LIST_BEFORE_RE = /\b(?:no|not|non|anti|without|against|hate)[\s_#、,&/-]*(?:(?:or|and|nor|content|images?|models?|tools?|training|learning)[\s_#、,&/-]*)*$/;
 // 後置否定只接受用途／訓練等連接語，不把前面的獨立 AI 創作者宣告一併放行。
-const NEGATION_AFTER_RE = /^(?:[\s_#・/、へのをにはで的之-]|使用|利用|学習|學習|学习|訓練|训练|生成|イラスト|アート|絵|画像|一切|用於|用于|\b(?:art|artwork|images?|content|use|usage|for|machine|learning|training|is|are|strictly|absolutely)\b)*(?:禁止|不可|拒否|お断り|不使用|未使用|使用しません|使いません|してません|しません|ではない|ではありません|じゃない|\b(?:ng|prohibit\w*|forbid\w*|banned|not\s+allowed|free|hater|sucks?|theft|thie(?:f|ves))\b)/;
+const NEGATION_AFTER_RE = /^(?:[\s_#・/、へのをにはで的之-]|使用|利用|学習|學習|学习|訓練|训练|生成|イラスト|アート|絵|画像|一切|用於|用于|\b(?:art|artists?|artwork|images?|content|use|usage|for|machine|learning|training|is|are|strictly|absolutely)\b)*(?:禁止|不可|拒否|お断り|不使用|未使用|使用しません|使いません|してません|しません|ではない|ではありません|じゃない|\b(?:ng|prohibit\w*|forbid\w*|banned|not\s+(?:allowed|used|welcome)|free|hater|sucks?|theft|thie(?:f|ves))\b)/;
 
 function isNegated(text, index, length) {
   const before = fold(text.slice(0, index)).split(CLAUSE_BREAK_RE).at(-1);
   const after = fold(text.slice(index + length)).split(CLAUSE_BREAK_RE)[0];
-  return NEGATION_PREFIX_RE.test(before) || NEGATION_BEFORE_RE.test(before) || NEGATION_AFTER_RE.test(after);
+  const matched = fold(text.slice(index, index + length));
+  // 也檢查命中片段內部，避免「AI-free artist」的 free 被角色模式吃掉。
+  const afterAi = matched.startsWith('ai') ? matched.slice(2) + after : after;
+  // 並列項目共用否定；其他文字保留，避免把獨立的創作宣告一起抹掉。
+  return NEGATION_PREFIX_RE.test(before) || NEGATION_BEFORE_RE.test(before)
+    || NEGATION_LIST_BEFORE_RE.test(before.replace(AI_REFERENCE_RE, ''))
+    || NEGATION_AFTER_RE.test(after.replace(AI_REFERENCE_RE, ''))
+    || NEGATION_AFTER_RE.test(afterAi.replace(AI_REFERENCE_RE, ''));
 }
 
 // AI 創作者的自介寫法：「3D+AI NSFW animator」「AI artist」「animator using AI」「made with AI」
 // 以及常見的高產量動畫／圖片集寫法（很多 AI 創作者不會直接寫 AI）
 const AI_ROLE = '(?:animat\\w*|artists?|art|artworks?|creators?|creations?|generated|generator|hentai|nsfw|waifus?|girls?|images?|illustrat\\w*|videos?|porn|lewds?|render\\w*|anime)';
+const AI_TOOLS = '(?:novelai|midjourney|niji(?:journey)?|pixai|stable[\\s_-]*diffusion|comfyui|automatic1111|a1111)';
+const AI_REFERENCE_RE = new RegExp(`(?<![.\\w])#?(?:ai(?:[\\s_-]*(?:${AI_ROLE}|生成|イラスト|アート|絵画|絵|繪畫|绘画|繪圖|绘图|插畫|插画|グラビア|美女|美少女))?|${AI_TOOLS})(?![a-z0-9])`, 'g');
 const AI_BIO_PATTERNS = [
   /\b\d\s?d\s*[+&]\s*ai\b/g,
   new RegExp(`(?<![.\\w])ai\\b[\\s-]*(?:[\\w-]+[\\s-]+)?${AI_ROLE}\\b`, 'g'),
@@ -57,7 +67,7 @@ const AI_BIO_PATTERNS = [
   /\bfull\s*(?:uncensored\s*)?set\b/gi,
   /\bsets?\s*available\b/gi,
   // 常見 AI 工具（即使沒寫 AI 也高度可疑）
-  /\b(?:novelai|midjourney|niji(?:journey)?|pixai|stable\s*diffusion|comfyui|automatic1111|a1111)\b/gi,
+  new RegExp(`\\b${AI_TOOLS}\\b`, 'g'),
 ];
 // 單獨出現的 AI：太短不足以刪除，只當疑似（.ai 網域不算）
 const BARE_AI_RE = /(?<![.\w])ai\b/g;
