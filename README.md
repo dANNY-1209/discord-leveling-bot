@@ -301,8 +301,15 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 | rule34／gelbooru 等看 `id`；kemono 換域名（party／su／cr）算同一個；instagram `reel` ↔ `p` |
 | 其他網站走通用規則：去 `www.`、去尾斜線、去 `#fragment`、砍 `utm_*`／`fbclid` 之類追蹤參數、參數排序後比對，`http` 與 `https` 同一條 |
 
-**不列入去重**：Discord 訊息跳轉連結、以及忽略清單上的網域（預設 `tenor.com`、`giphy.com`，
-反應圖不該被當重複貼文）。清單用 `/dupe ignore-domain` 增減，比對含子網域。
+**不列入去重**：
+
+- Discord 訊息跳轉連結
+- GIF／反應圖站：`tenor.com`、`tenor.co`、`giphy.com`、`gph.is`、`klipy.com`（含子網域，例如 `media.tenor.com`）
+- Discord 的表情與貼圖網址（`cdn.discordapp.com/emojis/…`、`media.discordapp.net/stickers/…` 等），
+  以及 `cdn.discordapp.com`／`media.discordapp.net` 上的 `.gif`（GIF 收藏夾貼出來的就是這種）
+- 忽略清單上的網域（預設 `tenor.com`、`giphy.com`）。清單用 `/dupe ignore-domain` 增減，比對含子網域。
+
+前三項寫死在程式裡，不受忽略清單影響——反應圖本來就會被一直重貼，刪掉只會誤傷。
 
 ### 清理既有的重複（`/dupe purge`）
 

@@ -154,7 +154,33 @@ export function normalizeUrl(raw) {
   return `${host}${path}${qs ? `?${qs}` : ''}`;
 }
 
-/** Discord 跳轉連結與忽略清單上的網域不列入去重 */
+// GIF／反應圖站：同一張梗圖本來就會一直被貼，永遠不列入去重（不受 /dupe ignore-domain 影響）
+export const REACTION_GIF_HOSTS = ['tenor.com', 'tenor.co', 'giphy.com', 'gph.is', 'klipy.com'];
+const DISCORD_MEDIA_HOSTS = ['cdn.discordapp.com', 'media.discordapp.net', 'discordapp.com', 'discord.com'];
+
+/**
+ * Discord 自家的表情、貼圖網址，以及 Discord CDN 上的 GIF
+ * （GIF 收藏夾、從別處複製來的動圖常常就是 cdn/media.discordapp 的 .gif）。
+ */
+function isDiscordEmojiOrGif(host, path) {
+  if (!hostIn(host, DISCORD_MEDIA_HOSTS)) return false;
+  if (/^\/(?:emojis|stickers|app-assets\/\d+\/store|soundboard-sounds)\//i.test(path)) return true;
+  return host !== 'discord.com' && host !== 'discordapp.com' && /\.gif$/i.test(path);
+}
+
+/** GIF 站、Discord 表情／貼圖這類「反應用」的網址，不管伺服器怎麼設都不去重 */
+export function isReactionMediaUrl(raw) {
+  let u;
+  try {
+    u = new URL(String(raw ?? '').trim());
+  } catch {
+    return false;
+  }
+  const host = baseHost(u.hostname);
+  return hostIn(host, REACTION_GIF_HOSTS) || isDiscordEmojiOrGif(host, u.pathname);
+}
+
+/** Discord 跳轉連結、GIF／表情貼圖網址、忽略清單上的網域不列入去重 */
 function isIgnored(raw, norm, ignoredDomains) {
   if (norm.startsWith('discord.com/channels/')) return true;
   let host;
@@ -163,6 +189,7 @@ function isIgnored(raw, norm, ignoredDomains) {
   } catch {
     return true;
   }
+  if (isReactionMediaUrl(raw)) return true;
   return hostIn(host, ignoredDomains);
 }
 
