@@ -192,3 +192,38 @@ test('explicit AI creation evidence still deletes a message in delete mode', asy
   assert.equal((await handleAiFilter(message)).deleted, true);
   assert.equal(deleted.mock.callCount(), 1);
 });
+
+test('repeated AI deletions warn at 3 and mute for a day at 5', async (t) => {
+  const guildId = 'strike-guild';
+  const channelId = 'strike-art';
+  addAiFilterChannel(guildId, channelId);
+  const target = mockX(t, { bio: 'AI artist. Do not train AI on my work.' });
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'warn', () => {});
+
+  const sent = [];
+  const timeout = t.mock.fn(async () => {});
+  const member = { timeout };
+  const make = (id) => ({
+    id, author: { id: 'repeat-offender' },
+    guild: {
+      id: guildId,
+      members: { me: { permissions: { has: () => true } }, fetch: async () => member },
+      channels: { cache: new Map(), fetch: async () => null },
+    },
+    channel: {
+      id: channelId, send: async (payload) => { sent.push(payload.content); },
+      permissionsFor: () => ({ has: () => true }),
+    },
+    content: `https://x.com/${target.handle}/status/${target.id}`,
+    delete: async () => {},
+  });
+
+  for (let i = 1; i <= 5; i++) await handleAiFilter(make(`strike-${i}`));
+
+  assert.equal(sent.length, 3, 'warnings at counts 3, 4 and 5');
+  assert.match(sent[0], /\*\*3\*\* 次/);
+  assert.match(sent[2], /禁言 1 天/);
+  assert.equal(timeout.mock.callCount(), 1);
+  assert.equal(timeout.mock.calls[0].arguments[0], 24 * 3600_000);
+});

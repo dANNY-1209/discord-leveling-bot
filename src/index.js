@@ -3,7 +3,7 @@ import { commands, commandMap } from './commands/index.js';
 import { awardForMessage, awardForReaction, applyRewards, cancelPending } from './lib/xp.js';
 import { handleStickerTriggers } from './lib/triggers.js';
 import { handleLinkDupes, handleLatePreview } from './lib/dupe.js';
-import { handleAiFilter } from './lib/aifilter.js';
+import { handleAiFilter, startAiFilterScanLoop } from './lib/aifilter.js';
 import { getMember, closeDb, forgetDupeLinksByMessage } from './lib/db.js';
 
 const token = process.env.DISCORD_TOKEN;
@@ -31,6 +31,8 @@ client.once(Events.ClientReady, async (c) => {
   for (const g of c.guilds.cache.values()) console.log(`   ├ ${g.name} (${g.id}) — ${g.memberCount} 人`);
 
   if (process.env.AUTO_DEPLOY_COMMANDS !== '0') await registerCommands(c.user.id);
+
+  startAiFilterScanLoop(c); // 定時主動掃描 AI 創作者連結（AI_FILTER_SCAN_MINUTES，預設 30，0 關閉）
 
   if (targetGuildId && !c.guilds.cache.has(targetGuildId)) {
     console.warn(
