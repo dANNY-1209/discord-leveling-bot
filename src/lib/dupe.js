@@ -507,7 +507,8 @@ export async function expandZoneChannels(guild, channelIds) {
   return [...out.values()];
 }
 
-async function fetchHistory(channel, limit) {
+/** 最近 limit 則訊息（由新到舊）。Discord 一次最多給 100 則，超過要分頁 */
+export async function fetchHistory(channel, limit) {
   const out = [];
   let before;
   while (out.length < limit) {

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 // Import after setting the path so tests never open the bot's real database.
 process.env.SQLITE_PATH = ':memory:';
-const { matchAiBio, matchKeyword, extractHashtags, evaluateTarget, evaluateText, handleAiFilter } = await import('../src/lib/aifilter.js');
+const { matchAiBio, matchKeyword, extractHashtags, evaluateTarget, evaluateText, handleAiFilter, scanGuild } = await import('../src/lib/aifilter.js');
 const { DEFAULT_AI_KEYWORDS, addAiFilterChannel } = await import('../src/lib/db.js');
 
 const BULY_BIO = '只會畫畫的平凡人 (´・ω・｀)\n成人向創作者，閱讀注意\nR18絵師 · 無断転載 · AI使用禁止\n\n請不要把我的任何作品拿去餵低能AI';
@@ -226,4 +226,60 @@ test('repeated AI deletions warn at 3 and mute for a day at 5', async (t) => {
   assert.match(sent[2], /禁言 1 天/);
   assert.equal(timeout.mock.callCount(), 1);
   assert.equal(timeout.mock.calls[0].arguments[0], 24 * 3600_000);
+});
+
+test('scan pages past 100 messages and notifies each offender only once', async (t) => {
+  const guildId = 'scan-guild';
+  const channelId = 'scan-art';
+  addAiFilterChannel(guildId, channelId);
+  const target = mockX(t, { bio: 'AI artist' });
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'warn', () => {});
+
+  class Page extends Map { last() { return [...this.values()].at(-1); } }
+  const sent = [];
+  const timeout = t.mock.fn(async () => {});
+  const allow = { has: () => true };
+  const guild = {
+    id: guildId,
+    members: { me: { permissions: allow }, fetch: async () => ({ timeout }) },
+    channels: { cache: new Map(), fetch: async () => null, fetchActiveThreads: async () => ({}) },
+  };
+  const channel = {
+    id: channelId, name: 'scan-art',
+    isTextBased: () => true, isDMBased: () => false, isVoiceBased: () => false, isThread: () => false,
+    permissionsFor: () => allow,
+    send: async (payload) => { sent.push(payload.content); },
+  };
+  guild.channels.cache.set(channelId, channel);
+
+  // 150 則訊息，新到舊；其中 6 則是同一人貼的 AI 連結
+  const all = [];
+  for (let i = 150; i >= 1; i--) {
+    const ai = i % 25 === 0;
+    all.push({
+      id: String(i).padStart(4, '0'), guild, channel, createdTimestamp: i,
+      author: { id: ai ? 'scan-offender' : `u${i}` },
+      content: ai ? `https://x.com/${target.handle}/status/${target.id}` : 'hello',
+      delete: async () => {},
+    });
+  }
+  channel.messages = {
+    fetch: async ({ limit, before, after }) => {
+      if (after) return new Page();
+      if (limit > 100) throw new Error('limit over 100');
+      const start = before ? all.findIndex((m) => m.id === before) + 1 : 0;
+      return new Page(all.slice(start, start + limit).map((m) => [m.id, m]));
+    },
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = scanGuild(guild, { limit: 150 });
+  for (let i = 0; i < 20; i++) { await new Promise(setImmediate); t.mock.timers.tick(1000); }
+  const stats = await pending;
+
+  assert.equal(stats.messages, 150);
+  assert.equal(stats.deleted, 6);
+  assert.equal(sent.length, 1, 'one notice per user per scan');
+  assert.match(sent[0], /\*\*6\*\* 次，已禁言 1 天/);
+  assert.equal(timeout.mock.callCount(), 1);
 });

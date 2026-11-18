@@ -2,7 +2,9 @@ import { PermissionFlagsBits } from 'discord.js';
 import {
   addAiFilterStrike, getAiFilter, listAiFilterChannels, listAiFilterCreators, listAiFilterKeywords,
 } from './db.js';
-import { baseHost, channelChain, deleteWithPreviews, extractUrls, hostIn, TWITTER_HOSTS } from './dupe.js';
+import {
+  baseHost, channelChain, deleteWithPreviews, extractUrls, fetchHistory, hostIn, TWITTER_HOSTS,
+} from './dupe.js';
 
 export const aiFilterStats = { checked: 0, matched: 0, deleted: 0, failed: 0, unknown: 0, suspect: 0 };
 
@@ -510,7 +512,7 @@ async function sendLog(message, settings, verdict, deleted) {
  * 過濾頻道裡貼 AI 創作者的連結或 tag 就處理掉。
  * 跟 XP／去重完全獨立；訊息被刪時，既有的 messageDelete 會一併取消 pending 與去重紀錄。
  */
-export async function handleAiFilter(message) {
+export async function handleAiFilter(message, { strikeBatch = null } = {}) {
   const guildId = message.guild.id;
   const settings = getAiFilter(guildId);
   if (settings.action === 'off') return null;
@@ -569,7 +571,12 @@ export async function handleAiFilter(message) {
 
   console.log(`[aifilter] ${deleted ? '已刪除' : '未刪除'} ${message.id}：${hit.reason}（${hit.source}）`);
   await sendLog(message, settings, hit, deleted);
-  if (deleted) await punishStrike(message, settings);
+  if (deleted && message.author?.id) {
+    const count = addAiFilterStrike(guildId, message.author.id);
+    // 掃描時先累積，掃完每人只通知一次；平常當場處理
+    if (strikeBatch) strikeBatch.set(message.author.id, { message, count });
+    else await punishStrike(message, settings, count);
+  }
   return { deleted, verdict: hit };
 }
 
@@ -582,11 +589,9 @@ async function logChannelOf(guild, settings) {
   return channel?.isTextBased?.() ? channel : null;
 }
 
-/** 記下這次刪除；達到警告線發警告，達到禁言線禁言 1 天 */
-async function punishStrike(message, settings) {
-  const userId = message.author?.id;
-  if (!userId) return;
-  const count = addAiFilterStrike(message.guild.id, userId);
+/** 累計次數達到警告線發警告，達到禁言線禁言 1 天。message 是這位使用者最後被刪的那則 */
+async function punishStrike(message, settings, count) {
+  const userId = message.author.id;
   if (count < STRIKE_WARN_AT) return;
 
   const muted = count >= STRIKE_MUTE_AT ? await muteMember(message, userId) : false;
@@ -644,7 +649,7 @@ export async function scanGuild(guild, { limit = 100 } = {}) {
   scanning.add(guild.id);
 
   const stats = { channels: 0, messages: 0, deleted: 0, skipped: [] };
-  const deletedBefore = aiFilterStats.deleted;
+  const strikeBatch = new Map(); // 使用者 id -> 最後被刪的訊息與累計次數
   try {
     // 論壇貼文等討論串通常是未快取的，先把活躍的抓進來
     await guild.channels.fetchActiveThreads().catch(() => {});
@@ -657,20 +662,23 @@ export async function scanGuild(guild, { limit = 100 } = {}) {
         continue;
       }
       stats.channels++;
-      const batch = await channel.messages.fetch({ limit }).catch(() => null);
-      if (!batch) continue;
-      // 由舊到新，刪除次數的警告順序才符合實際發文順序
-      for (const message of [...batch.values()].reverse()) {
+      const history = await fetchHistory(channel, limit);
+      // 由舊到新，最後留下的才是每人最新被刪的那則
+      for (const message of history.reverse()) {
         if (message.author?.bot || message.webhookId || message.system) continue;
         stats.messages++;
-        await handleAiFilter(message).catch((err) => console.error('[aifilter] 掃描時出錯', err));
-        await sleep(100);
+        const result = await handleAiFilter(message, { strikeBatch })
+          .catch((err) => { console.error('[aifilter] 掃描時出錯', err); return null; });
+        if (result?.deleted) {
+          stats.deleted++;
+          await sleep(350); // 給 Discord 的刪訊速率留餘裕
+        }
       }
     }
+    for (const { message, count } of strikeBatch.values()) await punishStrike(message, settings, count);
   } finally {
     scanning.delete(guild.id);
   }
-  stats.deleted = aiFilterStats.deleted - deletedBefore;
   return stats;
 }
 
