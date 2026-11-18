@@ -191,6 +191,14 @@ CREATE TABLE IF NOT EXISTS ai_filter_keywords (
   keyword  TEXT NOT NULL,
   PRIMARY KEY (guild_id, keyword)
 );
+
+-- 每位使用者因 AI 過濾被刪除的次數（累計，管理員可重設）
+CREATE TABLE IF NOT EXISTS ai_filter_strikes (
+  guild_id TEXT NOT NULL,
+  user_id  TEXT NOT NULL,
+  count    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, user_id)
+);
 `);
 
 // ---------- 遷移（既有 DB 也要能升到 v1.1）----------
@@ -819,6 +827,29 @@ export function claimReactionAward(guildId, messageId, reactorId) {
 
 export function countReactionAwards(guildId) {
   return db.prepare('SELECT COUNT(*) AS n FROM reaction_awards WHERE guild_id = ?').get(guildId).n;
+}
+
+// ---------- AI 過濾的刪除次數（警告／禁言用）----------
+
+const bumpAiStrike = db.prepare(
+  'INSERT INTO ai_filter_strikes (guild_id, user_id, count) VALUES (?, ?, 1) '
+  + 'ON CONFLICT(guild_id, user_id) DO UPDATE SET count = count + 1'
+);
+const readAiStrike = db.prepare('SELECT count FROM ai_filter_strikes WHERE guild_id = ? AND user_id = ?');
+
+/** 記一次刪除，回傳累計次數 */
+export function addAiFilterStrike(guildId, userId) {
+  bumpAiStrike.run(guildId, userId);
+  return readAiFilterStrike(guildId, userId);
+}
+
+export function readAiFilterStrike(guildId, userId) {
+  return readAiStrike.get(guildId, userId)?.count ?? 0;
+}
+
+export function resetAiFilterStrike(guildId, userId) {
+  return db.prepare('DELETE FROM ai_filter_strikes WHERE guild_id = ? AND user_id = ?')
+    .run(guildId, userId).changes > 0;
 }
 
 export function closeDb() {

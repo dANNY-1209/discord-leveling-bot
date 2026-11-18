@@ -6,8 +6,12 @@ import {
   listAiFilterChannels, addAiFilterChannel, removeAiFilterChannel,
   listAiFilterCreators, setAiFilterCreator, removeAiFilterCreator,
   listAiFilterKeywords, addAiFilterKeyword, removeAiFilterKeyword,
+  readAiFilterStrike, resetAiFilterStrike,
 } from '../lib/db.js';
-import { aiFilterStats, evaluateTarget, evaluateText, linkedCreators, parseTarget } from '../lib/aifilter.js';
+import {
+  aiFilterStats, evaluateTarget, evaluateText, linkedCreators, parseTarget,
+  scanGuild, STRIKE_MUTE_AT, STRIKE_WARN_AT,
+} from '../lib/aifilter.js';
 import { num } from '../lib/format.js';
 
 const ACTION_LABEL = { delete: '刪除訊息', log: '只記錄不刪', off: '停用' };
@@ -60,7 +64,18 @@ export const data = new SlashCommandBuilder()
     .addStringOption((o) => o.setName('value').setDescription('例如 AIイラスト')))
   .addSubcommand((s) => s
     .setName('check').setDescription('試判定一段文字或連結（不會刪任何東西）')
-    .addStringOption((o) => o.setName('text').setDescription('連結或含 #tag 的文字').setRequired(true)));
+    .addStringOption((o) => o.setName('text').setDescription('連結或含 #tag 的文字').setRequired(true)))
+  .addSubcommand((s) => s
+    .setName('scan').setDescription('立刻掃描過濾頻道的歷史訊息，命中的照規則處理')
+    .addIntegerOption((o) => o.setName('limit').setDescription('每個頻道往回掃幾則（預設 100）')
+      .setMinValue(10).setMaxValue(500)))
+  .addSubcommand((s) => s
+    .setName('strikes').setDescription('查看或重設某位使用者的 AI 過濾刪除次數')
+    .addUserOption((o) => o.setName('user').setDescription('要查的使用者').setRequired(true))
+    .addStringOption((o) => o.setName('action').setDescription('預設只查看').addChoices(
+      { name: '查看', value: 'view' },
+      { name: '重設為 0（誤判或已處理時用）', value: 'reset' },
+    )));
 
 export async function execute(interaction) {
   const guildId = interaction.guildId;
@@ -74,8 +89,42 @@ export async function execute(interaction) {
     case 'creator': return creator(interaction, guildId);
     case 'keyword': return keyword(interaction, guildId);
     case 'check': return check(interaction, guildId);
+    case 'scan': return scan(interaction, guildId);
+    case 'strikes': return strikes(interaction, guildId);
     default: return reply(interaction, '未知的子指令。');
   }
+}
+
+async function scan(interaction, guildId) {
+  const limit = interaction.options.getInteger('limit') ?? 100;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const stats = await scanGuild(interaction.guild, { limit });
+  if (stats === null) {
+    return interaction.editReply('⚠️ 沒有掃描：模式是「停用」，或還沒有指定過濾頻道。');
+  }
+  if (stats.busy) return interaction.editReply('這個伺服器正在掃描中，請稍後再試。');
+
+  const lines = [
+    `✅ 掃描完成：${stats.channels} 個頻道、${stats.messages} 則訊息，刪除 **${stats.deleted}** 則。`,
+  ];
+  if (stats.skipped.length) lines.push(`⚠️ 沒有權限讀取而略過：${stats.skipped.map((n) => `\`${n}\``).join('、')}`);
+  if (getAiFilter(guildId).action !== 'delete') lines.push('（目前不是「刪除訊息」模式，命中只記錄、未刪除。）');
+  return interaction.editReply(lines.join('\n'));
+}
+
+async function strikes(interaction, guildId) {
+  const user = interaction.options.getUser('user');
+  const action = interaction.options.getString('action') ?? 'view';
+  if (action === 'reset') {
+    const had = resetAiFilterStrike(guildId, user.id);
+    return reply(interaction, had ? `✅ <@${user.id}> 的刪除次數已重設為 0。` : `<@${user.id}> 本來就是 0 次。`);
+  }
+  const count = readAiFilterStrike(guildId, user.id);
+  const next = count >= STRIKE_MUTE_AT ? '已達禁言門檻（再被刪仍會禁言 1 天）'
+    : count >= STRIKE_WARN_AT ? `已達警告門檻，再累積到 ${STRIKE_MUTE_AT} 次會禁言 1 天`
+      : `還沒到警告門檻（${STRIKE_WARN_AT} 次）`;
+  return reply(interaction, `<@${user.id}> 因 AI 過濾被刪除 **${count}** 次：${next}。`);
 }
 
 function watch(interaction, guildId) {
