@@ -308,8 +308,11 @@ async function deletePreview(message) {
   }
 }
 
-/** 刪掉重複訊息，連同已經發出來的預覽。沒刪成功會丟錯，預覽也不會動 */
-async function deleteWithPreviews(message) {
+/**
+ * 刪掉訊息，連同預覽 Bot（ermiana）已經發出來的預覽。沒刪成功會丟錯，預覽也不會動。
+ * 去重與 AI 過濾共用：預覽清理失敗只記 log，不影響「訊息已刪」這件事。
+ */
+export async function deleteWithPreviews(message) {
   // 先記再刪：預覽可能剛好在刪除途中送達
   rememberUntil(deletedSources, message.id, LATE_PREVIEW_MS);
   try {
@@ -319,11 +322,15 @@ async function deleteWithPreviews(message) {
     throw err;
   }
 
-  const after = await message.channel.messages.fetch({ after: message.id, limit: 50 }).catch(() => null);
-  if (!after) return;
-  const { previews, inTail } = findPreviews(message.id, [...after.values()].filter(isPreviewBotMessage));
-  await Promise.all(previews.map(deletePreview));
-  if (inTail) rememberUntil(openMediaTails, message.channel.id, LATE_MEDIA_MS);
+  try {
+    const after = await message.channel.messages.fetch({ after: message.id, limit: 50 }).catch(() => null);
+    if (!after) return;
+    const { previews, inTail } = findPreviews(message.id, [...after.values()].filter(isPreviewBotMessage));
+    await Promise.all(previews.map(deletePreview));
+    if (inTail) rememberUntil(openMediaTails, message.channel.id, LATE_MEDIA_MS);
+  } catch (err) {
+    console.warn(`[preview] 找預覽時失敗（訊息已刪）: ${err.message}`);
+  }
 }
 
 /** 預覽 Bot 的新訊息：對象已經被當重複刪掉的話，這則也不留 */
