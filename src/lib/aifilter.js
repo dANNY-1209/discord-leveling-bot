@@ -1,6 +1,8 @@
 import { PermissionFlagsBits } from 'discord.js';
 import {
   addAiFilterStrike, getAiFilter, listAiFilterChannels, listAiFilterCreators, listAiFilterKeywords,
+  readAiFilterStrike, voidAiFilterStrikesByCreator, voidAiFilterStrikeByMessage, voidLegacyAiFilterStrike,
+  listModlogAiFilterDeletions, recordAiFilterMute, getAiFilterMute, clearAiFilterMute,
 } from './db.js';
 import {
   baseHost, channelChain, deleteWithPreviews, extractUrls, fetchHistory, hostIn, TWITTER_HOSTS,
@@ -588,7 +590,10 @@ export async function handleAiFilter(message, { strikeBatch = null } = {}) {
   console.log(`[aifilter] ${deleted ? '已刪除' : '未刪除'} ${message.id}：${hit.reason}（${hit.source}）`);
   await sendLog(message, settings, hit, deleted);
   if (deleted && message.author?.id) {
-    const count = addAiFilterStrike(guildId, message.author.id);
+    // 記下是因哪位創作者被刪：之後放行這位創作者（誤判）時，這筆就不算次數
+    const count = addAiFilterStrike(guildId, message.author.id, {
+      messageId: message.id, creator: hit.creator ?? null, reason: hit.reason,
+    });
     // 掃描時先累積，掃完每人只通知一次；平常當場處理
     if (strikeBatch) strikeBatch.set(message.author.id, { message, count });
     else await punishStrike(message, settings, count);
@@ -639,12 +644,84 @@ async function muteMember(message, userId) {
   try {
     const member = await message.guild.members.fetch(userId);
     await member.timeout(MUTE_MS, `AI 創作者連結被刪除達 ${STRIKE_MUTE_AT} 次`);
+    recordAiFilterMute(message.guild.id, userId, member.communicationDisabledUntilTimestamp ?? Date.now() + MUTE_MS);
     console.log(`[aifilter] 已禁言 ${userId} 1 天`);
     return true;
   } catch (err) {
     console.warn(`[aifilter] 禁言 ${userId} 失敗: ${err.message}`);
     return false;
   }
+}
+
+// ---------- 誤判撤銷：不算警告／禁言次數 ----------
+
+/** 訊息文字裡的連結直接指得出來的創作者（不連外查詢：作品連結要查才知道作者，那種略過） */
+function creatorsInText(text) {
+  const out = new Set();
+  for (const raw of extractUrls(text ?? '')) {
+    const t = parseTarget(raw);
+    if (!t) continue;
+    if ((t.type === 'x-status' || t.type === 'x-user') && t.handle) out.add(`x:${t.handle}`);
+    else if (t.type === 'pixiv-user') out.add(`pixiv:${t.id}`);
+    else if (t.type === 'patreon') out.add(`patreon:${t.slug}`);
+  }
+  return out;
+}
+
+/**
+ * 次數降到禁言門檻以下時，解除 AI 過濾自己下的禁言。
+ * 只動我們記得的那次禁言（到期時間對得上），管理員另外加的禁言不碰。
+ */
+async function liftMuteIfCleared(guild, userId) {
+  const until = getAiFilterMute(guild.id, userId);
+  if (!until) return false;
+  if (until <= Date.now()) { clearAiFilterMute(guild.id, userId); return false; }
+  if (readAiFilterStrike(guild.id, userId) >= STRIKE_MUTE_AT) return false;
+  const member = await guild.members.fetch(userId).catch(() => null);
+  const current = member?.communicationDisabledUntilTimestamp ?? 0;
+  if (!member || Math.abs(current - until) > 60_000) { clearAiFilterMute(guild.id, userId); return false; }
+  try {
+    await member.timeout(null, 'AI 過濾誤判撤銷，刪除次數已低於禁言門檻');
+    clearAiFilterMute(guild.id, userId);
+    console.log(`[aifilter] 誤判撤銷，已解除 ${userId} 的禁言`);
+    return true;
+  } catch (err) {
+    console.warn(`[aifilter] 解除 ${userId} 的禁言失敗: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * 創作者被放行（誤判）：因這位創作者被刪的次數全部作廢，不再算警告／禁言。
+ * 逐筆紀錄上線前的舊次數，若活動日誌（/log）有那則訊息的快照，也能對回來扣掉。
+ * 回傳 { users: [{ userId, voided, count, unmuted }], total }
+ */
+export async function pardonCreator(guild, creator) {
+  const voidReason = `放行 ${creator}`;
+  const perUser = new Map();
+  for (const { userId, voided } of voidAiFilterStrikesByCreator(guild.id, creator, voidReason)) {
+    perUser.set(userId, voided);
+  }
+  for (const row of listModlogAiFilterDeletions(guild.id)) {
+    if (!creatorsInText(row.content).has(creator)) continue;
+    if (voidLegacyAiFilterStrike(guild.id, row.author_id, row.message_id, creator, voidReason)) {
+      perUser.set(row.author_id, (perUser.get(row.author_id) ?? 0) + 1);
+    }
+  }
+  const users = [];
+  for (const [userId, voided] of perUser) {
+    const unmuted = await liftMuteIfCleared(guild, userId);
+    users.push({ userId, voided, count: readAiFilterStrike(guild.id, userId), unmuted });
+  }
+  return { users, total: users.reduce((n, u) => n + u.voided, 0) };
+}
+
+/** 撤銷某一則被刪訊息的次數（tag 誤判這類沒有創作者可放行的情況）。回傳 null 表示沒有這筆 */
+export async function pardonMessage(guild, messageId) {
+  const userId = voidAiFilterStrikeByMessage(guild.id, messageId, '管理員撤銷');
+  if (!userId) return null;
+  const unmuted = await liftMuteIfCleared(guild, userId);
+  return { userId, count: readAiFilterStrike(guild.id, userId), unmuted };
 }
 
 // ---------- 主動掃描 ----------

@@ -347,3 +347,100 @@ for (const text of ['AI NSFW animator', 'AI hentai art', 'AI generated images', 
     assert.equal(verdict.hit, true);
   });
 }
+
+// ---------- 誤判不算警告／禁言次數 ----------
+
+const { pardonCreator, pardonMessage } = await import('../src/lib/aifilter.js');
+const {
+  addAiFilterStrike, readAiFilterStrike, saveModlogMessage, markModlogDeleted,
+} = await import('../src/lib/db.js');
+
+function strikeHarness(t, guildId, { mutedUntil = Date.now() + 24 * 3600_000 } = {}) {
+  const channelId = `${guildId}-art`;
+  addAiFilterChannel(guildId, channelId);
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'warn', () => {});
+  const sent = [];
+  const timeout = t.mock.fn(async () => {});
+  const member = { timeout, communicationDisabledUntilTimestamp: mutedUntil };
+  const guild = {
+    id: guildId,
+    members: { me: { permissions: { has: () => true } }, fetch: async () => member },
+    channels: { cache: new Map(), fetch: async () => null },
+  };
+  const make = (id, content, authorId = 'misjudged-user') => ({
+    id, author: { id: authorId }, guild,
+    channel: { id: channelId, send: async (p) => { sent.push(p.content); }, permissionsFor: () => ({ has: () => true }) },
+    content, delete: async () => {},
+  });
+  return { guild, member, timeout, sent, make };
+}
+
+test('allow-listing a misjudged creator voids its strikes and lifts the bot mute', async (t) => {
+  const { guild, timeout, make } = strikeHarness(t, 'pardon-guild');
+  const target = mockX(t, { name: 'kaiarts', handle: 'kaiser_oof9', bio: 'AI artist' });
+  for (let i = 1; i <= 5; i++) await handleAiFilter(make(`pardon-msg-${i}`, `https://x.com/kaiser_oof9/status/${target.id}`));
+  assert.equal(readAiFilterStrike(guild.id, 'misjudged-user'), 5);
+  assert.equal(timeout.mock.callCount(), 1, 'muted at 5');
+
+  const result = await pardonCreator(guild, 'x:kaiser_oof9');
+  assert.equal(result.total, 5);
+  assert.deepEqual(result.users.map((u) => [u.userId, u.voided, u.count, u.unmuted]), [['misjudged-user', 5, 0, true]]);
+  assert.equal(readAiFilterStrike(guild.id, 'misjudged-user'), 0);
+  assert.equal(timeout.mock.calls[1].arguments[0], null, 'timeout cleared');
+
+  // Pardoning twice changes nothing.
+  assert.equal((await pardonCreator(guild, 'x:kaiser_oof9')).total, 0);
+});
+
+test('strikes for other creators still count after a pardon', async (t) => {
+  const { guild, make } = strikeHarness(t, 'pardon-mixed');
+  const bad = mockX(t, { handle: 'real_ai_artist', bio: 'AI artist' });
+  await handleAiFilter(make('mixed-1', `https://x.com/real_ai_artist/status/${bad.id}`));
+  t.mock.restoreAll();
+  const misjudged = mockX(t, { handle: 'kaiser_oof9', bio: 'AI artist' });
+  await handleAiFilter(make('mixed-2', `https://x.com/kaiser_oof9/status/${misjudged.id}`));
+  assert.equal(readAiFilterStrike(guild.id, 'misjudged-user'), 2);
+  await pardonCreator(guild, 'x:kaiser_oof9');
+  assert.equal(readAiFilterStrike(guild.id, 'misjudged-user'), 1);
+});
+
+test('the same message scanned twice only counts once', async (t) => {
+  const { guild } = strikeHarness(t, 'pardon-dedupe');
+  addAiFilterStrike(guild.id, 'misjudged-user', { messageId: 'same-msg', creator: 'x:dup_ai' });
+  addAiFilterStrike(guild.id, 'misjudged-user', { messageId: 'same-msg', creator: 'x:dup_ai' });
+  assert.equal(readAiFilterStrike(guild.id, 'misjudged-user'), 1);
+});
+
+test('a single misjudged deletion can be voided by message id', async (t) => {
+  const { guild } = strikeHarness(t, 'pardon-message');
+  addAiFilterStrike(guild.id, 'tag-user', { messageId: '111111111111111111', creator: null, reason: '訊息裡的 tag' });
+  addAiFilterStrike(guild.id, 'tag-user', { messageId: '222222222222222222', creator: null, reason: '訊息裡的 tag' });
+  const result = await pardonMessage(guild, '111111111111111111');
+  assert.equal(result.userId, 'tag-user');
+  assert.equal(result.count, 1);
+  assert.equal(await pardonMessage(guild, '111111111111111111'), null);
+});
+
+test('a mute added by a moderator is not lifted by a pardon', async (t) => {
+  const { guild, member, timeout, make } = strikeHarness(t, 'pardon-manual-mute');
+  const target = mockX(t, { handle: 'kaiser_oof9', bio: 'AI artist' });
+  for (let i = 1; i <= 5; i++) await handleAiFilter(make(`manual-${i}`, `https://x.com/kaiser_oof9/status/${target.id}`));
+  member.communicationDisabledUntilTimestamp = Date.now() + 7 * 24 * 3600_000; // a moderator extended it
+  const result = await pardonCreator(guild, 'x:kaiser_oof9');
+  assert.equal(result.users[0].unmuted, false);
+  assert.equal(timeout.mock.callCount(), 1, 'only the original mute');
+});
+
+test('strikes counted before per-message logging are recovered from the deletion log', async (t) => {
+  const { guild } = strikeHarness(t, 'pardon-legacy');
+  addAiFilterStrike(guild.id, 'old-user'); // legacy counter, no message id
+  addAiFilterStrike(guild.id, 'old-user');
+  saveModlogMessage({ messageId: 'legacy-msg', guildId: guild.id, channelId: 'c', authorId: 'old-user',
+    content: 'look https://fxtwitter.com/Kaiser_oof9/status/123', createdAt: Date.now() - 1000 });
+  markModlogDeleted('legacy-msg', { reason: 'ai-filter' });
+
+  const result = await pardonCreator(guild, 'x:kaiser_oof9');
+  assert.deepEqual(result.users.map((u) => [u.userId, u.voided, u.count]), [['old-user', 1, 1]]);
+  assert.equal((await pardonCreator(guild, 'x:kaiser_oof9')).total, 0, 'not subtracted twice');
+});

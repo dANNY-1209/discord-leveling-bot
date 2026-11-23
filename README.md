@@ -360,10 +360,11 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 /ai-filter mode action:只記錄不刪              ← 試運行；確認沒誤判再改回「刪除訊息」
 /ai-filter check text:<連結或 #tag>            ← 試判定，不刪任何東西
 /ai-filter creator action:封鎖 target:@handle  ← 也接受作者頁／作品連結、pixiv 使用者 ID
-/ai-filter creator action:放行 target:<連結>   ← 誤判時用，優先於所有自動判定
+/ai-filter creator action:放行 target:<連結>   ← 誤判時用，優先於所有自動判定；因他被刪的次數一併作廢
 /ai-filter keyword action:add value:AIイラスト
 /ai-filter scan limit:100                      ← 立刻掃描過濾頻道最近 100 則，命中照規則處理
-/ai-filter strikes user:@someone               ← 查看刪除次數；action:重設為 0 可清掉誤判
+/ai-filter strikes user:@someone               ← 查看刪除次數與最近幾則（含訊息 ID、創作者）
+/ai-filter strikes action:撤銷某一則 message-id:<ID>   ← 單則誤判不算次數；action:重設為 0 全部清掉
 /ai-filter view
 ```
 
@@ -376,7 +377,12 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
   - 達到 **3 次**：在被刪的頻道發警告（提及該使用者）並寫進紀錄頻道。
   - 達到 **5 次**：禁言 1 天（Discord 的 timeout）。之後再被刪仍會再禁言 1 天。
   - 需要 Bot 有「禁言成員」權限；對方權限高於 Bot 時禁言會失敗，改在紀錄裡提醒管理員。
-  - 次數只算 AI 過濾的刪除，不含去重與 `/dupe purge`。
+  - 次數只算 AI 過濾的刪除，不含去重與 `/dupe purge`。同一則訊息被重複掃到只算一次。
+- **誤判不算次數**：每次刪除都記下訊息 ID 與命中的創作者。
+  - 用 `/ai-filter creator action:放行` 放行某位創作者，等於承認之前是誤判：因他被刪的次數**全部作廢**，回覆會列出每位使用者扣了幾次。
+  - 沒有創作者可放行的誤判（例如 tag），用 `/ai-filter strikes action:撤銷某一則 message-id:<ID>`。
+  - 作廢後低於 5 次、而且是 **Bot 自己下的禁言**（到期時間對得上）就自動解除；管理員另外加或延長的禁言不會被動到。
+  - 逐筆紀錄上線前累計的舊次數沒有訊息資訊；若 `/log` 活動日誌當時有開、存到那則訊息，放行時也會對回來扣掉。其他舊次數請用「重設為 0」。
 
 ### 判定規則（第一個命中就停）
 
@@ -514,6 +520,7 @@ v1.2 新增 `guild_settings.media_bonus_xp` 與 `media_bonus_channels` 表。
 （都是 `CREATE TABLE IF NOT EXISTS`，舊 DB 開機自動建，不動既有資料）。第一次建分區時會把預設忽略網域
 （`tenor.com`／`giphy.com`）寫進去，記在 `schema_meta` 的 `dupe-ignore-seed:<guild_id>`，之後自己刪掉不會被塞回來。
 
+AI 過濾的刪除次數另有 `ai_filter_strike_log`（逐筆，誤判時作廢）與 `ai_filter_mutes`（Bot 自己下的禁言，誤判撤銷時用），同樣開機自動建。
 AI 過濾新增 `ai_filter_settings`／`ai_filter_channels`／`ai_filter_creators`／`ai_filter_keywords` 四張表
 （同樣開機自動建）。預設關鍵字第一次用到時寫入，記在 `schema_meta` 的 `ai-keywords-seed:<guild_id>`，之後自己刪掉不會被塞回來。
 
