@@ -283,3 +283,67 @@ test('scan pages past 100 messages and notifies each offender only once', async 
   assert.match(sent[0], /\*\*6\*\* 次，已禁言 1 天/);
   assert.equal(timeout.mock.callCount(), 1);
 });
+
+// ---------- 誤判回歸：ryoyustarlight、kaiser_oof9（2026-11-23） ----------
+
+test('kaiser_oof9: "kaiarts" display name is not the AIart keyword', async (t) => {
+  assert.equal(matchKeyword('kaiarts', DEFAULT_AI_KEYWORDS), null);
+  const verdict = await evaluateTarget(mockX(t, { name: 'kaiarts', handle: 'kaiser_oof9', bio: 'comms in the works', text: 'comfy' }), rules());
+  assert.deepEqual(verdict, { hit: false, creator: 'x:kaiser_oof9' });
+});
+
+test('ryoyustarlight: "AI❌" in the bio is a protection notice, not even a suspect', async (t) => {
+  const bio = '🎨練習中 / AI❌\npixiv:  http://pixiv.net/users/2848854';
+  const verdict = await evaluateTarget(mockX(t, { name: 'RYOYU', handle: 'ryoyustarlight', bio, text: 'フラウ\n#グラブル #グラブルファンアート' }), rules());
+  assert.deepEqual(verdict, { hit: false, creator: 'x:ryoyustarlight' });
+});
+
+for (const text of ['🚫AI', 'AI✖️ 手描き', 'AI ❌', 'no AI 🙅', 'AI NG', '⛔ AI']) {
+  test(`symbol negation is a protection notice: ${text}`, async (t) => {
+    const verdict = await evaluateTarget(mockX(t, { bio: text }), rules());
+    assert.equal(verdict.hit, false);
+    assert.ok(!verdict.suspect);
+  });
+}
+
+test('an unrelated emoji after AI is not a negation', async (t) => {
+  const verdict = await evaluateTarget(mockX(t, { bio: 'AI🎨' }), rules());
+  assert.equal(verdict.suspect, true);
+});
+
+for (const name of ['kaiarts', 'Thaiartist', 'saiart_', 'maiartworks', 'Niji fanart', 'にじさんじ fan']) {
+  test(`AI keywords inside ordinary words do not match: ${name}`, async (t) => {
+    const verdict = await evaluateTarget(mockX(t, { name, bio: 'illustrator' }), rules());
+    assert.equal(verdict.hit, false);
+  });
+}
+
+test('AI keywords after an nsfw prefix still match as a tag', async () => {
+  assert.ok((await evaluateText('tags', 'new pic #nsfwAIart')).hit);
+  assert.ok((await evaluateText('tags', 'new pic #NSFW_AIart')).hit);
+});
+
+for (const text of ['full set on patreon', 'NSFW animations & images', 'SFW animations here', 'animation preview 🔞', 'sets available on fanbox']) {
+  test(`volume wording without AI is only a suspect: ${text}`, async (t) => {
+    const fromBio = await evaluateTarget(mockX(t, { bio: text }), rules());
+    assert.equal(fromBio.hit, false);
+    assert.equal(fromBio.suspect, true);
+    const fromTweet = await evaluateTarget(mockX(t, { bio: 'artist', text }), rules());
+    assert.equal(fromTweet.hit, false);
+    assert.equal(fromTweet.suspect, true);
+  });
+}
+
+for (const text of ['AI hater, art commissions open', 'AI is not art', 'AI sucks. art by hand']) {
+  test(`an arbitrary word between AI and art does not create AI evidence: ${text}`, async (t) => {
+    const verdict = await evaluateTarget(mockX(t, { bio: text }), rules());
+    assert.equal(verdict.hit, false);
+  });
+}
+
+for (const text of ['AI NSFW animator', 'AI hentai art', 'AI generated images', 'NijiJourney prompts', 'nsfw AI art']) {
+  test(`real AI creator wording still matches: ${text}`, async (t) => {
+    const verdict = await evaluateTarget(mockX(t, { bio: text }), rules());
+    assert.equal(verdict.hit, true);
+  });
+}

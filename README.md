@@ -390,7 +390,8 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 | X 個人頁 | 封鎖名單；簡介／顯示名稱含關鍵字或 AI 創作者寫法（`3D+AI`、`AI artist`、`AI NSFW animator`、`animator using AI`、`made with AI`）；或簡介連到封鎖名單上的 Patreon／標明的小號 |
 | Patreon 連結 | 只看封鎖名單 |
 
-**疑似（只發到紀錄頻道，永遠不刪）**：X 簡介／顯示名稱單獨提到 AI、帳號有以底線分隔的 `AI` 標記（例如 `Aisora_AI`），或推文是「角色 - 作品」加一行 `sfw`／`nsfw` 的固定文案。
+**疑似（只發到紀錄頻道，永遠不刪）**：X 簡介／顯示名稱單獨提到 AI、帳號有以底線分隔的 `AI` 標記（例如 `Aisora_AI`），或推文是「角色 - 作品」加一行 `sfw`／`nsfw` 的固定文案；
+以及**沒提到 AI 的圖包／動畫集寫法**（`full set`、`sets available`、`SFW animations`、`NSFW images & animations`、`animation preview`）。
 手繪作者也可能這樣寫，所以由管理員判斷，要擋就 `/ai-filter creator action:封鎖`。沒設紀錄頻道時只寫 log。
 
 用 `/ai-filter creator` 封鎖 X 帳號時，簡介裡的 Patreon 與標明的小號（`SFW Acc: x.com/…` 這種）會一併封鎖，
@@ -399,8 +400,12 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 `vxtwitter`／`fxtwitter`／`fixupx` 等鏡像站與去重共用同一份網域清單。關鍵字比對不分大小寫、全半形，
 忽略空格／底線／連字號；**禁止使用／訓練 AI 的聲明不當成 AI 證據，也不因該聲明發疑似通知**。
 支援中英日文，例如 `AI使用禁止`、`請不要把我的任何作品拿去餵低能AI`、`AI学習禁止`、`Do not use my artwork to train AI`。
+符號也算否定：`AI❌`、`🚫AI`、`AI✖️`、`⛔ AI`、`AI NG`。
 也辨識 `AI-free artist`，以及共用否定語的並列項目，例如 `No #AIart or #AIgenerated`、`AIイラスト、AI生成の学習禁止`。
 否定只影響同一句／子句，訊息與推文的 `#tag` 也保留原句上下文；若另一句明確寫 `AI artist` 或使用 `#AIart`，仍會命中。
+英文關鍵字從單字開頭比對：顯示名稱 `kaiarts` 不會被當成 `AIart`（前面接 `nsfw`／`sfw`／`r18` 的 tag 例如 `#nsfwAIart` 仍算）；
+單獨的 `niji`（虹ヶ咲、にじさんじ）不算 AI 工具，只認 `NijiJourney`。`AI ___ artist` 中間只接受 `NSFW`、`hentai`、`3D` 這類修飾詞，
+所以 `AI hater, art commissions open` 不會命中。
 這是文字規則判斷；只有 `_AI` 帳號標記時只報疑似，已確認的 AI 創作者可用 `/ai-filter creator action:封鎖 target:@Aisora_AI` 加入名單。
 
 執行 `npm test` 可驗證保護聲明、混合 AI 創作宣告、hashtag 上下文、X 名稱與帳號標記，以及刪除／放行流程；測試使用記憶體資料庫與模擬查詢。
