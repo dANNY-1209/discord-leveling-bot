@@ -2,7 +2,7 @@ import { PermissionFlagsBits } from 'discord.js';
 import {
   getSettings, getMember, addXp, getRank,
   listRewards, listIgnoredChannels, listIgnoredRoles, resolveMediaBonus, listLinkDomains,
-  isIgnoredUser, reactionAlreadyAwarded, claimReactionAward,
+  isIgnoredUser, reactionAlreadyAwarded, claimReactionAward, setModlogXp,
 } from './db.js';
 import { renderTemplate } from './format.js';
 import {
@@ -213,6 +213,8 @@ async function grant(message, hash, hasMedia = false, hasLink = false) {
     touchCooldown: true, countMessage: true, contentHash: hash, touchLinkBonus: linkBonus > 0,
   });
   stats.granted++;
+  // 活動日誌：記下這則拿了多少，之後被刪就看得出「拿完 XP 才刪」（沒開紀錄時沒有這一列，不會動到）
+  setModlogXp(message.id, amount);
 
   if (result.leveledUp) {
     await announceLevelUp(

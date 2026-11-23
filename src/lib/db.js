@@ -199,6 +199,62 @@ CREATE TABLE IF NOT EXISTS ai_filter_strikes (
   count    INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (guild_id, user_id)
 );
+
+-- 活動日誌／刪除訊息紀錄。預設關閉；開啟後才會存訊息內容，超過 retention_days 自動清掉
+CREATE TABLE IF NOT EXISTS modlog_settings (
+  guild_id            TEXT PRIMARY KEY,
+  enabled             INTEGER NOT NULL DEFAULT 0,
+  delete_channel_id   TEXT,
+  activity_channel_id TEXT,
+  retention_days      INTEGER NOT NULL DEFAULT 14,
+  include_bots        INTEGER NOT NULL DEFAULT 0,
+  bot_deletions       INTEGER NOT NULL DEFAULT 1,
+  save_attachments    INTEGER NOT NULL DEFAULT 0
+);
+
+-- 不記錄的頻道（或分類）
+CREATE TABLE IF NOT EXISTS modlog_ignored_channels (
+  guild_id   TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  PRIMARY KEY (guild_id, channel_id)
+);
+
+-- 訊息快照。刪除事件裡內容常是空的（不在快取、Bot 重啟過），所以收訊時先存一份
+CREATE TABLE IF NOT EXISTS modlog_messages (
+  message_id    TEXT PRIMARY KEY,
+  guild_id      TEXT    NOT NULL,
+  channel_id    TEXT    NOT NULL,
+  author_id     TEXT,
+  author_tag    TEXT,
+  author_bot    INTEGER NOT NULL DEFAULT 0,
+  content       TEXT    NOT NULL DEFAULT '',
+  attachments   TEXT    NOT NULL DEFAULT '[]',
+  stickers      TEXT    NOT NULL DEFAULT '[]',
+  reply_to      TEXT,
+  created_at    INTEGER NOT NULL,
+  edited_at     INTEGER,
+  deleted_at    INTEGER,
+  deleted_by    TEXT,
+  delete_reason TEXT,
+  -- 這則訊息入帳的 XP（0 = 沒拿到）；刪除時 pending 被取消記 1。用來抓「拿完 XP 就刪」的人
+  xp_awarded    INTEGER NOT NULL DEFAULT 0,
+  xp_cancelled  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_modlog_messages_deleted ON modlog_messages (guild_id, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_modlog_messages_created ON modlog_messages (created_at);
+
+-- 活動事件：編輯、加入／離開、暱稱、角色、禁言、封鎖、刪除…
+CREATE TABLE IF NOT EXISTS modlog_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id   TEXT    NOT NULL,
+  type       TEXT    NOT NULL,
+  user_id    TEXT,
+  channel_id TEXT,
+  message_id TEXT,
+  summary    TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_modlog_events_guild ON modlog_events (guild_id, created_at);
 `);
 
 // ---------- 遷移（既有 DB 也要能升到 v1.1）----------
@@ -800,6 +856,179 @@ export function removeAiFilterKeyword(guildId, keyword) {
   seedAiKeywords(guildId);
   return db.prepare('DELETE FROM ai_filter_keywords WHERE guild_id = ? AND keyword = ?')
     .run(guildId, keyword).changes > 0;
+}
+
+// ---------- 活動日誌／刪除訊息紀錄 ----------
+
+const MODLOG_DEFAULTS = {
+  enabled: 0, delete_channel_id: null, activity_channel_id: null,
+  retention_days: 14, include_bots: 0, bot_deletions: 1, save_attachments: 0,
+};
+const MODLOG_COLUMNS = Object.keys(MODLOG_DEFAULTS);
+
+export function getModlog(guildId) {
+  return db.prepare('SELECT * FROM modlog_settings WHERE guild_id = ?').get(guildId)
+    ?? { guild_id: guildId, ...MODLOG_DEFAULTS };
+}
+
+export function updateModlog(guildId, patch) {
+  const next = { ...getModlog(guildId) };
+  for (const k of MODLOG_COLUMNS) if (patch[k] !== undefined) next[k] = patch[k];
+  db.prepare(`INSERT OR REPLACE INTO modlog_settings (guild_id, ${MODLOG_COLUMNS.join(', ')})
+    VALUES (?, ${MODLOG_COLUMNS.map(() => '?').join(', ')})`)
+    .run(guildId, ...MODLOG_COLUMNS.map((k) => next[k]));
+  return next;
+}
+
+export function listModlogIgnoredChannels(guildId) {
+  return db.prepare('SELECT channel_id FROM modlog_ignored_channels WHERE guild_id = ?').all(guildId).map((r) => r.channel_id);
+}
+
+export function addModlogIgnoredChannel(guildId, channelId) {
+  return db.prepare('INSERT OR IGNORE INTO modlog_ignored_channels (guild_id, channel_id) VALUES (?, ?)')
+    .run(guildId, channelId).changes > 0;
+}
+
+export function removeModlogIgnoredChannel(guildId, channelId) {
+  return db.prepare('DELETE FROM modlog_ignored_channels WHERE guild_id = ? AND channel_id = ?')
+    .run(guildId, channelId).changes > 0;
+}
+
+const parseJsonList = (v) => { try { return JSON.parse(v ?? '[]'); } catch { return []; } };
+const hydrateMessage = (r) => r && { ...r, attachments: parseJsonList(r.attachments), stickers: parseJsonList(r.stickers) };
+
+const upsertModlogMessage = db.prepare(`
+  INSERT INTO modlog_messages
+    (message_id, guild_id, channel_id, author_id, author_tag, author_bot, content, attachments, stickers, reply_to, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (message_id) DO UPDATE SET
+    content = excluded.content,
+    attachments = CASE WHEN excluded.attachments = '[]' THEN modlog_messages.attachments ELSE excluded.attachments END,
+    stickers = excluded.stickers
+`);
+
+export function saveModlogMessage(m) {
+  upsertModlogMessage.run(
+    m.messageId, m.guildId, m.channelId, m.authorId ?? null, m.authorTag ?? null, m.authorBot ? 1 : 0,
+    m.content ?? '', JSON.stringify(m.attachments ?? []), JSON.stringify(m.stickers ?? []),
+    m.replyTo ?? null, m.createdAt ?? now(),
+  );
+}
+
+export function getModlogMessage(messageId) {
+  return hydrateMessage(db.prepare('SELECT * FROM modlog_messages WHERE message_id = ?').get(messageId));
+}
+
+export function updateModlogMessageContent(messageId, content, editedAt = now()) {
+  return db.prepare('UPDATE modlog_messages SET content = ?, edited_at = ? WHERE message_id = ?')
+    .run(content, editedAt, messageId).changes > 0;
+}
+
+/** 標成已刪除。回傳 false 表示已經標過（同一則不重複記錄） */
+export function markModlogDeleted(messageId, { deletedAt = now(), deletedBy = null, reason = null, xpCancelled = false } = {}) {
+  return db.prepare(`UPDATE modlog_messages SET deleted_at = ?, deleted_by = ?, delete_reason = ?, xp_cancelled = ?
+    WHERE message_id = ? AND deleted_at IS NULL`)
+    .run(deletedAt, deletedBy, reason, xpCancelled ? 1 : 0, messageId).changes > 0;
+}
+
+/** 延遲入帳成功時記下這則拿了多少 XP（沒有快照就不動） */
+export function setModlogXp(messageId, amount) {
+  return db.prepare('UPDATE modlog_messages SET xp_awarded = ? WHERE message_id = ?').run(amount, messageId).changes > 0;
+}
+
+/** 這則訊息帶給作者幾筆反應 XP（刪訊不會追回，所以也列進觀察） */
+export function countReactionAwardsForMessage(guildId, messageId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM reaction_awards WHERE guild_id = ? AND message_id = ?').get(guildId, messageId).n;
+}
+
+/**
+ * 依使用者統計「自己刪的」訊息（排除 Bot 刪的、查得到是別人刪的）。
+ * awarded = 已入帳才刪（XP 留著、內容沒了）；cancelled = 排隊中就刪（沒拿到 XP，但表示在試）；
+ * quick = 發出後 quickMs 內就刪。依已入帳後刪除的 XP 總量排序。
+ */
+export function listModlogDeleteSuspects(guildId, { since = 0, quickMs = 60_000, limit = 10, minDeletes = 1 } = {}) {
+  return db.prepare(`
+    SELECT author_id, MAX(author_tag) AS author_tag,
+      COUNT(*) AS deletes,
+      SUM(CASE WHEN xp_awarded > 0 THEN 1 ELSE 0 END) AS awarded,
+      SUM(xp_awarded) AS xp,
+      SUM(xp_cancelled) AS cancelled,
+      SUM(CASE WHEN deleted_at - created_at < ? THEN 1 ELSE 0 END) AS quick,
+      MAX(deleted_at) AS last_deleted_at
+    FROM modlog_messages
+    WHERE guild_id = ? AND deleted_at IS NOT NULL AND deleted_at >= ?
+      AND author_id IS NOT NULL AND author_bot = 0
+      AND delete_reason IS NULL
+      AND (deleted_by IS NULL OR deleted_by = author_id OR deleted_by = '?')
+    GROUP BY author_id
+    HAVING COUNT(*) >= ?
+    ORDER BY xp DESC, awarded DESC, deletes DESC
+    LIMIT ?
+  `).all(quickMs, guildId, since, minDeletes, limit);
+}
+
+/** 查已刪除的訊息，新的在前 */
+export function listModlogDeleted(guildId, { userId = null, channelIds = null, since = 0, limit = 10, source = 'all' } = {}) {
+  const where = ['guild_id = ?', 'deleted_at IS NOT NULL', 'deleted_at >= ?'];
+  const args = [guildId, since];
+  // self = 本人刪（或查不到是誰）；others = 管理員刪；bot = 本 Bot 去重／AI 過濾刪；xp = 已入帳才刪
+  // deleted_by：作者 ID = 本人；'?' = 沒權限查稽核紀錄、分不出來（列在 self）；其他 ID = 管理員
+  if (source === 'self') where.push('delete_reason IS NULL', "(deleted_by IS NULL OR deleted_by = author_id OR deleted_by = '?')");
+  else if (source === 'others') where.push('delete_reason IS NULL', 'deleted_by IS NOT NULL', "deleted_by != '?'", "deleted_by != COALESCE(author_id, '')");
+  else if (source === 'bot') where.push('delete_reason IS NOT NULL');
+  else if (source === 'xp') where.push('xp_awarded > 0');
+  if (userId) { where.push('author_id = ?'); args.push(userId); }
+  if (channelIds?.length) { where.push(`channel_id IN (${channelIds.map(() => '?').join(', ')})`); args.push(...channelIds); }
+  return db.prepare(`SELECT * FROM modlog_messages WHERE ${where.join(' AND ')} ORDER BY deleted_at DESC, created_at DESC LIMIT ?`)
+    .all(...args, limit).map(hydrateMessage);
+}
+
+export function addModlogEvent(guildId, { type, userId = null, channelId = null, messageId = null, summary, createdAt = now() }) {
+  db.prepare(`INSERT INTO modlog_events (guild_id, type, user_id, channel_id, message_id, summary, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(guildId, type, userId, channelId, messageId, summary, createdAt);
+}
+
+export function listModlogEvents(guildId, { userId = null, types = null, since = 0, limit = 20 } = {}) {
+  const where = ['guild_id = ?', 'created_at >= ?'];
+  const args = [guildId, since];
+  if (userId) { where.push('user_id = ?'); args.push(userId); }
+  if (types?.length) { where.push(`type IN (${types.map(() => '?').join(', ')})`); args.push(...types); }
+  return db.prepare(`SELECT * FROM modlog_events WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ?`)
+    .all(...args, limit);
+}
+
+export function countModlog(guildId) {
+  const m = db.prepare(`SELECT COUNT(*) AS stored, COUNT(deleted_at) AS deleted FROM modlog_messages WHERE guild_id = ?`).get(guildId);
+  const e = db.prepare('SELECT COUNT(*) AS n FROM modlog_events WHERE guild_id = ?').get(guildId);
+  return { stored: m.stored, deleted: m.deleted, events: e.n };
+}
+
+/**
+ * 依各伺服器的保存天數清掉過期資料。回傳被清掉的訊息（呼叫端要順便刪本機附件檔）。
+ * 已刪除的訊息從刪除時間起算，所以剛被刪的舊訊息也能保留完整天數。
+ */
+export function pruneModlog(at = now()) {
+  const guilds = db.prepare(`
+    SELECT guild_id FROM modlog_messages UNION SELECT guild_id FROM modlog_events
+  `).all().map((r) => r.guild_id);
+  const removed = [];
+  for (const guildId of guilds) {
+    const cutoff = at - getModlog(guildId).retention_days * 86_400_000;
+    const old = db.prepare(`SELECT message_id, guild_id, attachments FROM modlog_messages
+      WHERE guild_id = ? AND COALESCE(deleted_at, created_at) < ?`).all(guildId, cutoff);
+    db.prepare('DELETE FROM modlog_messages WHERE guild_id = ? AND COALESCE(deleted_at, created_at) < ?').run(guildId, cutoff);
+    db.prepare('DELETE FROM modlog_events WHERE guild_id = ? AND created_at < ?').run(guildId, cutoff);
+    removed.push(...old.map(hydrateMessage));
+  }
+  return removed;
+}
+
+/** 關掉紀錄時把該伺服器存的訊息與事件一次清空 */
+export function purgeModlogGuild(guildId) {
+  const rows = db.prepare('SELECT message_id, guild_id, attachments FROM modlog_messages WHERE guild_id = ?').all(guildId);
+  db.prepare('DELETE FROM modlog_messages WHERE guild_id = ?').run(guildId);
+  db.prepare('DELETE FROM modlog_events WHERE guild_id = ?').run(guildId);
+  return rows.map(hydrateMessage);
 }
 
 // ---------- 反應 XP 去重 ----------

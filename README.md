@@ -52,6 +52,8 @@ sudo docker logs -f discord-leveling-bot
    Manage Roles / Use Application Commands。**沒有 Administrator**。
    要用 `/dupe` 刪重複連結還需要 **Manage Messages**，可以直接在伺服器設定把這個權限給 Bot 的角色，
    或用含該權限的邀請連結重新授權一次（`permissions=2416045056`）。
+   要用 `/log` 分辨「本人刪的」還是「管理員刪的」，再加 **View Audit Log**（檢視審核紀錄），
+   或用 `permissions=2416045184`（含 Manage Messages 與 View Audit Log）重新授權。
 3. **把 Bot 的角色拖到所有等級獎勵角色之上。** Discord 只允許 Bot 管理比自己低的角色，
    這是等級角色最常見的失敗原因。`/level-config view` 會直接標出哪幾級會失敗。
 
@@ -70,6 +72,7 @@ sudo docker logs -f discord-leveling-bot
 | `/trigger …` | Manage Server | 關鍵字自動回應（貼圖／轉發連結），見下 |
 | `/dupe …` | Manage Server | 分區連結去重：同一區貼過的連結再貼就刪，見下 |
 | `/ai-filter …` | Manage Server | 指定頻道過濾 pixiv／X 的 AI 創作者連結與 tag，見下 |
+| `/log …` | Manage Server | 活動日誌與刪除訊息紀錄；把已刪除的訊息發到指定頻道，找出拿完 XP 就刪的人，見下 |
 
 ### `/level-config` 子指令
 
@@ -104,7 +107,8 @@ sudo docker logs -f discord-leveling-bot
 - **pending 只放記憶體**，重啟後消失（17.9 明確允許）。已入帳的 XP 在 DB 裡不受影響。
 - **取消鍵只用 `message.id`**——刪除事件裡內容常是空的。`messageDelete` 與 `messageDeleteBulk` 都監聽。
 - **只有 pending 成功轉成 XP 才寫 `last_xp_at`**，所以「發→刪→再發」不能加快速率，理論上限仍是每 60 秒一則。
-- **不存訊息全文**。只存 `sha256(guildId + userId + 正規化內容)` 的前 16 hex。
+- **防刷本身不存訊息全文**。只存 `sha256(guildId + userId + 正規化內容)` 的前 16 hex。
+  （`/log` 開啟後會另外存訊息快照，有保存期限，見「活動日誌」一節。）
 - **重複比對只跟本人比**，不跟全服比——兩個人都說「早安」不會互相擋掉。
 - **沒有做事後追回（clawback）**。17.4 說明了原因：跨級回滾要重算等級、可能拔角色、排行榜會跳。
   `clawback_on_delete` 欄位保留但預設 0，未實作。
@@ -412,6 +416,63 @@ Bot 把連結當純文字發出，Discord 自己展開成那則訊息的預覽�
 - 查詢結果快取在記憶體（成功 6 小時、失敗 10 分鐘），重啟清空；名單與關鍵字改了立即生效。
 - 單則訊息最多查 10 條連結；釘選訊息不動。刪除一律靜默，不通知當事人。需要 **Manage Messages**。
 
+## 活動日誌與刪除訊息紀錄（`/log`，Owner 追加）
+
+記下**所有被刪的訊息**——不管是本人自己刪、管理員刪、還是本 Bot 的去重／AI 過濾刪的——
+並且可以用指令把它們發到指定頻道觀察。也記編輯、加入／離開、暱稱、角色、禁言、封鎖。
+主要用途是抓「發一堆廢話拿 XP、拿到之後再刪掉滅證」的人。
+
+```
+/log enable enabled:true                         ← 開始記錄（預設關閉，開了才存訊息內容）
+/log channel kind:刪除訊息 channel:#mod-log        ← 之後每則被刪的訊息自動發到這裡（可不設，只用指令調）
+/log channel kind:活動 channel:#mod-activity
+/log deleted to:#mod-log                          ← 把 24 小時內被刪的訊息發到 #mod-log
+/log deleted to:#mod-log user:@某人 source:拿到 XP 後才刪 hours:168 count:30
+/log suspects days:7 min-deletes:3                ← 自刪排行：誰拿了 XP 又刪、誰一直秒刪
+/log activity to:#mod-log user:@某人 type:✏️ 編輯
+/log ignore action:add channel:#管理員頻道           ← 不記錄某些頻道（選分類＝底下全部）
+/log options retention-days:14 save-attachments:true
+/log view
+```
+
+### 每則刪除紀錄會寫什麼
+
+| 欄位 | 說明 |
+|---|---|
+| 內容 | 收訊當下存的快照（編輯過的會是最後一版）；附件列檔名，開了 `save-attachments` 會附上原檔 |
+| 刪除者 | 🙋 本人刪除／🛡️ 管理員 @某人 刪除／🤖 Bot 刪除（去重、AI 過濾）／🧹 批次刪除 |
+| 存活時間 | 發出到刪除隔多久，60 秒內刪的標 ⚡ |
+| 經驗值 | ⚠️ **已入帳 +N XP 後才刪**（XP 不會追回）／⏳ 排隊中就刪、未入帳／未拿到訊息 XP |
+| 反應 XP | 這則訊息曾帶來幾筆反應 XP（刪訊同樣不追回） |
+
+### 抓刷經驗（`/log suspects`）
+
+延遲入帳（防刷第 17 節）擋得住「發了立刻刪」，但擋不住「等 20 秒入帳之後再刪」：XP 留著，證據沒了。
+`suspects` 只看**自己刪的**訊息（排除 Bot 刪的、查得到是管理員刪的），依使用者統計：
+
+- **入帳後刪**：拿到 XP 才刪的則數與 XP 總量（排序依據；≥3 則標 ⚠️）
+- **排隊中刪**：延遲入帳前就刪，沒拿到 XP，但代表在試
+- **⚡**：發出 60 秒內就刪
+
+看到可疑的人，用 `/log deleted user:@某人 source:拿到 XP 後才刪` 調出實際內容判斷，確認後用 `/remove-xp` 扣回。
+Bot 不會自動扣分，判斷交給管理員。
+
+### 行為細節
+
+- **預設關閉**。`/log enable enabled:true` 之後新訊息才會存快照；開啟前發的訊息被刪時只看得到「誰、在哪個頻道」，內容顯示「未記錄」。
+- **分辨本人刪還是管理員刪需要「檢視審核紀錄」權限**。Discord 只把「刪別人的訊息」寫進審核紀錄，所以查得到 = 管理員，查不到 = 本人。
+  沒這個權限時一律標成「本人刪除或無法確認」，`suspects` 也會把它們算進去。
+- **保存期限**預設 14 天（1–90），每小時清一次；已刪除的訊息從刪除時間起算。`/log enable enabled:false purge:true` 立即清空。
+- **轉發有權限檢查**：`/log deleted`、`/log activity` 只轉發**呼叫者看得到的頻道**的內容，避免把私密頻道的東西貼到別處；
+  目標頻道 @everyone 看得到時會警告。日誌頻道本身不記錄。
+- **其他 Bot／Webhook 的訊息預設不記**（`include-bots`）。本 Bot 刪的預設會發日誌並標原因，嫌吵可設 `bot-deletions:false`（仍會存）。
+  去重順手刪掉的 ermiana 預覽不會出現在日誌裡。
+- **附件**：訊息刪掉後 Discord 上的原檔也會失效。`save-attachments:true` 會在收訊時先下載（每檔 8 MB 內、每則最多 4 個），
+  存在資料庫旁的 `modlog-attachments/`，跟著保存期限一起清。圖多的伺服器會吃不少硬碟，預設關。
+- **批次刪除**（管理員清訊、封鎖時刪訊息）發一則摘要，完整內容附成 `.txt`。
+- 編輯紀錄只在**內容真的改了**才記（Discord 補連結預覽也會觸發編輯事件，那種不算）。
+- 封鎖／解封事件需要 `GuildModeration` intent（非特權，Portal 不用開，程式已宣告）。
+
 ## 規則（預設值 = MEE6）
 
 - 每則有效訊息隨機 **15–25 XP**，同一人 **60 秒冷卻**（per-user，不是全服一把鎖）。
@@ -450,6 +511,9 @@ v1.2 新增 `guild_settings.media_bonus_xp` 與 `media_bonus_channels` 表。
 
 AI 過濾新增 `ai_filter_settings`／`ai_filter_channels`／`ai_filter_creators`／`ai_filter_keywords` 四張表
 （同樣開機自動建）。預設關鍵字第一次用到時寫入，記在 `schema_meta` 的 `ai-keywords-seed:<guild_id>`，之後自己刪掉不會被塞回來。
+
+活動日誌新增 `modlog_settings`／`modlog_ignored_channels`／`modlog_messages`／`modlog_events` 四張表
+（同樣開機自動建）。`modlog_messages` 存訊息內容，只有 `/log enable` 過的伺服器才會寫入，超過保存天數自動刪除。
 
 一次性動作：既有伺服器若 `min_length` 還停在舊預設 0，會被套用為 17.11 的建議值 5，
 並在 `schema_meta` 記 `v1.1-antiabuse-defaults`，所以之後 Owner 自己改回 0 不會再被蓋掉。

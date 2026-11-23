@@ -3,6 +3,7 @@ import {
   resolveDupeZone, findDupeLink, recordDupeLink, listDupeIgnoredDomains,
   listDupeLinksByMessage, forgetDupeLink,
 } from './db.js';
+import { markBotDeletion } from './modlog.js';
 
 export const dupeStats = { recorded: 0, duplicates: 0, deleted: 0, failed: 0, previews: 0 };
 
@@ -299,6 +300,7 @@ function findPreviews(sourceId, botMessages) {
 /** 預覽刪失敗不影響去重本身；已經不在了（10008）不算錯 */
 async function deletePreview(message) {
   try {
+    markBotDeletion(message.id, 'dupe');
     await message.delete();
     dupeStats.previews++;
     return true;
@@ -312,9 +314,10 @@ async function deletePreview(message) {
  * 刪掉訊息，連同預覽 Bot（ermiana）已經發出來的預覽。沒刪成功會丟錯，預覽也不會動。
  * 去重與 AI 過濾共用：預覽清理失敗只記 log，不影響「訊息已刪」這件事。
  */
-export async function deleteWithPreviews(message) {
+export async function deleteWithPreviews(message, reason = 'dupe') {
   // 先記再刪：預覽可能剛好在刪除途中送達
   rememberUntil(deletedSources, message.id, LATE_PREVIEW_MS);
+  markBotDeletion(message.id, reason);
   try {
     await message.delete();
   } catch (err) {
@@ -608,6 +611,7 @@ export async function sweepZone(guild, zone, {
       if (deleteDupes && canDeleteIn.get(channel.id)) {
         if (stats.deleted >= SWEEP_DELETE_CAP) { stats.capped = true; continue; }
         try {
+          markBotDeletion(m.id, 'dupe');
           await m.delete();
           stats.deleted++;
           if (onProgress && stats.deleted % 25 === 0) await onProgress(stats);

@@ -551,8 +551,8 @@ export async function handleAiFilter(message, { strikeBatch = null } = {}) {
     const perms = message.channel.permissionsFor(message.guild.members.me);
     if (perms?.has(PermissionFlagsBits.ManageMessages)) {
       try {
-        // 連同預覽 Bot（ermiana）已發出的預覽一起刪
-        await deleteWithPreviews(message);
+        // 連同預覽 Bot（ermiana）已發出的預覽一起刪；刪除日誌記成 AI 過濾
+        await deleteWithPreviews(message, 'ai-filter');
         deleted = true;
         aiFilterStats.deleted++;
       } catch (err) {

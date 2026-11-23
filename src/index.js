@@ -5,6 +5,10 @@ import { handleStickerTriggers } from './lib/triggers.js';
 import { handleLinkDupes, handleLatePreview } from './lib/dupe.js';
 import { handleAiFilter, startAiFilterScanLoop } from './lib/aifilter.js';
 import { getMember, closeDb, forgetDupeLinksByMessage } from './lib/db.js';
+import {
+  snapshotMessage, handleMessageDelete, handleBulkDelete, handleMessageEdit,
+  handleMemberJoin, handleMemberLeave, handleMemberUpdate, handleBan, startModlogMaintenance,
+} from './lib/modlog.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -19,6 +23,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent, // Portal 開了還不夠，這裡也要宣告
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions, // 反應 XP。非特權 intent，Portal 不用另外開
+    GatewayIntentBits.GuildModeration, // 活動日誌的封鎖／解封事件。非特權
   ],
   // 17.3 要能收到「未快取訊息」的刪除事件，才不會漏掉取消 pending
   partials: [Partials.GuildMember, Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
@@ -31,6 +36,7 @@ client.once(Events.ClientReady, async (c) => {
   for (const g of c.guilds.cache.values()) console.log(`   ├ ${g.name} (${g.id}) — ${g.memberCount} 人`);
 
   if (process.env.AUTO_DEPLOY_COMMANDS !== '0') await registerCommands(c.user.id);
+  startModlogMaintenance();
 
   startAiFilterScanLoop(c); // 定時主動掃描 AI 創作者連結（AI_FILTER_SCAN_MINUTES，預設 30，0 關閉）
 
@@ -69,6 +75,8 @@ async function registerCommands(clientId) {
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.inGuild()) return;
+    // 活動日誌：先存快照（同步寫 DB），延遲入帳到期時才找得到這一列記 XP
+    try { snapshotMessage(message); } catch (err) { console.error('[modlog] 快照失敗', err); }
     // 預覽 Bot 可能比去重的刪除還晚到，要在濾掉 Bot 之前看
     if (message.author.bot) await handleLatePreview(message);
     if (message.author.bot || message.webhookId) return;
@@ -111,10 +119,11 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 });
 
 // 編輯後才貼上重複連結或 AI 連結也要擋，不然改一下訊息就繞過去了
-client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   try {
     if (newMessage.partial) newMessage = await newMessage.fetch();
     if (!newMessage.inGuild()) return;
+    handleMessageEdit(oldMessage, newMessage).catch((err) => console.error('[modlog] 編輯紀錄失敗', err));
     if (newMessage.author?.bot || newMessage.webhookId || newMessage.system) return;
     const results = await Promise.allSettled([handleLinkDupes(newMessage), handleAiFilter(newMessage)]);
     for (const r of results) if (r.status === 'rejected') console.error('[messageUpdate]', r.reason);
@@ -126,14 +135,18 @@ client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
 // 17.3 刪訊即取消尚未入帳的 pending。取消鍵只用 message.id——刪除事件裡內容常是空的。
 // 原始貼文被刪掉時也要放掉它佔住的連結，之後同一條可以再貼。
 client.on(Events.MessageDelete, (message) => {
-  if (cancelPending(message.id)) {
+  const xpCancelled = cancelPending(message.id);
+  if (xpCancelled) {
     console.log(`[antiabuse] pending 因刪訊取消 (message ${message.id})`);
   }
   const freed = forgetDupeLinksByMessage(message.id);
   if (freed > 0) console.log(`[dupe] 原始訊息 ${message.id} 已刪，放掉 ${freed} 條連結紀錄`);
+  // 不論誰刪的（本人、管理員、Bot）都記下來
+  handleMessageDelete(message, { xpCancelled }).catch((err) => console.error('[modlog] 刪除紀錄失敗', err));
 });
 
-client.on(Events.MessageBulkDelete, (messages) => {
+client.on(Events.MessageBulkDelete, (messages, channel) => {
+  handleBulkDelete(messages, channel).catch((err) => console.error('[modlog] 批次刪除紀錄失敗', err));
   let n = 0;
   let freed = 0;
   for (const id of messages.keys()) {
@@ -181,6 +194,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // 成員重新加入時，把他原本的等級角色補回去
 client.on(Events.GuildMemberAdd, async (member) => {
+  handleMemberJoin(member).catch((err) => console.error('[modlog] 加入紀錄失敗', err));
   try {
     const row = getMember(member.guild.id, member.id);
     if (row.total_xp > 0) await applyRewards(member, row.level);
@@ -188,6 +202,15 @@ client.on(Events.GuildMemberAdd, async (member) => {
     console.error('[guildMemberAdd]', err);
   }
 });
+
+client.on(Events.GuildMemberRemove, (member) => {
+  handleMemberLeave(member).catch((err) => console.error('[modlog] 離開紀錄失敗', err));
+});
+client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+  handleMemberUpdate(oldMember, newMember).catch((err) => console.error('[modlog] 成員變更紀錄失敗', err));
+});
+client.on(Events.GuildBanAdd, (ban) => handleBan(ban, true).catch((err) => console.error('[modlog] 封鎖紀錄失敗', err)));
+client.on(Events.GuildBanRemove, (ban) => handleBan(ban, false).catch((err) => console.error('[modlog] 解封紀錄失敗', err)));
 
 client.on(Events.Error, (err) => console.error('[client]', err));
 process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err));
