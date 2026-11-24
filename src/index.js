@@ -9,6 +9,7 @@ import {
   snapshotMessage, handleMessageDelete, handleBulkDelete, handleMessageEdit,
   handleMemberJoin, handleMemberLeave, handleMemberUpdate, handleBan, startModlogMaintenance,
 } from './lib/modlog.js';
+import { handleRejoinJoin, handleRejoinLeave } from './lib/rejoin.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -195,6 +196,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // 成員重新加入時，把他原本的等級角色補回去
 client.on(Events.GuildMemberAdd, async (member) => {
   handleMemberJoin(member).catch((err) => console.error('[modlog] 加入紀錄失敗', err));
+  // 反覆進出：記一筆加入，達門檻照設定通知或封禁
+  handleRejoinJoin(member).catch((err) => console.error('[rejoin] 加入處理失敗', err));
   try {
     const row = getMember(member.guild.id, member.id);
     if (row.total_xp > 0) await applyRewards(member, row.level);
@@ -205,6 +208,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 
 client.on(Events.GuildMemberRemove, (member) => {
   handleMemberLeave(member).catch((err) => console.error('[modlog] 離開紀錄失敗', err));
+  try { handleRejoinLeave(member); } catch (err) { console.error('[rejoin] 離開紀錄失敗', err); }
 });
 client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
   handleMemberUpdate(oldMember, newMember).catch((err) => console.error('[modlog] 成員變更紀錄失敗', err));

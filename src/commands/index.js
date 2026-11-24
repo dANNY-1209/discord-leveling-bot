@@ -10,7 +10,8 @@ import * as trigger from './trigger.js';
 import * as dupe from './dupe.js';
 import * as aiFilter from './ai-filter.js';
 import * as log from './log.js';
+import * as rejoin from './rejoin.js';
 
-export const commands = [rank, leaderboard, giveXp, removeXp, setLevelCmd, resetXp, syncRoles, levelConfig, trigger, dupe, aiFilter, log];
+export const commands = [rank, leaderboard, giveXp, removeXp, setLevelCmd, resetXp, syncRoles, levelConfig, trigger, dupe, aiFilter, log, rejoin];
 
 export const commandMap = new Map(commands.map((c) => [c.data.name, c]));
