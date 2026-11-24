@@ -6,6 +6,7 @@ import {
   saveModlogMessage, getModlogMessage, updateModlogMessageContent, markModlogDeleted,
   addModlogEvent, pruneModlog, countReactionAwardsForMessage, getMember,
 } from './db.js';
+import { withResolvableMentions } from './mentions.js';
 
 // 活動日誌／刪除訊息紀錄。預設關閉；/log enable 之後才開始存訊息快照。
 // 刪除事件只帶 message.id（訊息不在快取、Bot 重啟過時內容是空的），所以收訊時先把內容存進 DB。
@@ -414,7 +415,9 @@ function deletedEmbed(guild, row) {
     .setAuthor({ name: `${row.author_tag ?? '未知使用者'} 的訊息被刪除` })
     .setDescription(content)
     .addFields(
-      { name: '作者', value: row.author_id ? `<@${row.author_id}>` : '未知', inline: true },
+      { name: '作者', value: row.author_id ? `<@${row.author_id}>${row.author_tag ? `
+${row.author_tag}` : ''}
+\`${row.author_id}\`` : '未知', inline: true },
       { name: '頻道', value: `<#${row.channel_id}>`, inline: true },
       { name: '刪除者', value: deleteSourceText(row, guild), inline: true },
       { name: '發送時間', value: createdAt ? `<t:${createdAt}:f>` : '未知', inline: true },
@@ -481,7 +484,7 @@ export async function postToChannel(channel, payloads) {
   let sent = 0;
   for (const p of payloads) {
     try {
-      await channel.send({ ...p, allowedMentions: { parse: [] } });
+      await channel.send({ ...withResolvableMentions(p), allowedMentions: { parse: [] } });
       sent++;
       modlogStats.posted++;
     } catch (err) {

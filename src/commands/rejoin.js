@@ -6,6 +6,7 @@ import {
   scanMovements, enforceRejoin, setRejoinExempt, listRejoinExempt, rejoinStats, ENFORCE_CAP,
 } from '../lib/rejoin.js';
 import { num } from '../lib/format.js';
+import { withResolvableMentions } from '../lib/mentions.js';
 
 const ACTION_LABEL = { off: '只記錄（不處理）', notify: '達標發通知', ban: '達標自動封禁' };
 const SOURCE_LABEL = { live: 'Bot 即時', system: '系統訊息', modlog: '活動日誌', member: '目前成員' };
@@ -109,7 +110,7 @@ function list(interaction, guildId) {
         `　加入 **${r.joins}** 次・離開 ${r.leaves} 次・最近 ${ts(r.last_at, 'R')}・${flags}`;
     }).join('\n').slice(0, 4000));
   }
-  return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 function user(interaction, guildId) {
@@ -163,7 +164,7 @@ async function enforce(interaction) {
   const header = `${r.windowDays} 天內加入 ≥ ${r.threshold} 次、未被這個功能封禁過、不在豁免名單`;
   if (r.candidates.length === 0) return interaction.editReply(`沒有符合條件的人（${header}）。`);
   if (!confirm) {
-    const preview = r.candidates.slice(0, 20).map((c) => `・<@${c.user_id}> \`${c.user_id}\` 加入 ${c.joins} 次`);
+    const preview = r.candidates.slice(0, 20).map((c) => `・<@${c.user_id}> \`${c.user_id}\`${c.user_tag ? `（${c.user_tag}）` : ''} 加入 ${c.joins} 次`);
     return interaction.editReply({
       content: [`🔍 預覽：**${r.candidates.length}** 人會被封禁（${header}）：`, ...preview,
         r.candidates.length > 20 ? `…還有 ${r.candidates.length - 20} 人` : '',
@@ -206,7 +207,7 @@ function view(interaction, guildId) {
       { name: '豁免', value: `${listRejoinExempt(guildId).length} 人`, inline: true },
       { name: '本次啟動以來', value: `加入 ${num(rejoinStats.joins)}・離開 ${num(rejoinStats.leaves)}・通知 ${num(rejoinStats.notified)}・封禁 ${num(rejoinStats.banned)}（失敗 ${num(rejoinStats.banFailed)}）` },
     );
-  return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 function reply(interaction, content) {

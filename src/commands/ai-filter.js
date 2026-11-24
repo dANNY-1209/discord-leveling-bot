@@ -13,6 +13,7 @@ import {
   scanGuild, STRIKE_MUTE_AT, STRIKE_WARN_AT, pardonCreator, pardonMessage,
 } from '../lib/aifilter.js';
 import { num } from '../lib/format.js';
+import { withResolvableMentions } from '../lib/mentions.js';
 
 const ACTION_LABEL = { delete: '刪除訊息', log: '只記錄不刪', off: '停用' };
 
@@ -189,7 +190,7 @@ function view(interaction, guildId) {
       { name: 'Tag／關鍵字', value: listAiFilterKeywords(guildId).map((k) => `\`${k}\``).join('、').slice(0, 1000) || '（無）' },
     )
     .setFooter({ text: `本次啟動以來：檢查 ${num(aiFilterStats.checked)} · 命中 ${num(aiFilterStats.matched)} · 刪除 ${num(aiFilterStats.deleted)} · 失敗 ${num(aiFilterStats.failed)} · 無法判定 ${num(aiFilterStats.unknown)} · 疑似 ${num(aiFilterStats.suspect)}` });
-  return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
 }
 
 function mode(interaction, guildId) {
