@@ -7,6 +7,7 @@ import {
 import {
   baseHost, channelChain, deleteWithPreviews, extractUrls, fetchHistory, hostIn, TWITTER_HOSTS,
 } from './dupe.js';
+import { resolveMentions } from './mentions.js';
 
 export const aiFilterStats = { checked: 0, matched: 0, deleted: 0, failed: 0, unknown: 0, suspect: 0 };
 
@@ -518,12 +519,13 @@ async function sendLog(message, settings, verdict, deleted) {
   else if (settings.action === 'delete') status = '⚠️ 應刪除但失敗';
   const jump = deleted ? '' : `\n訊息：${message.url}`;
   const who = verdict.creator ? `\n創作者：\`${verdict.creator}\`` : '';
-  await channel.send({
+  const raw = {
     // <> 包住網址，紀錄頻道不展開預覽
-    content: `${status} <@${message.author.id}> 在 <#${message.channel.id}>\n` +
+    content: `${status} <@${message.author.id}> \`${message.author.id}\` 在 <#${message.channel.id}>\n` +
       `原因：${verdict.reason}${who}\n來源：${verdict.source.startsWith('#') ? verdict.source : `<${verdict.source}>`}${jump}`,
-    allowedMentions: { parse: [] },
-  }).catch((err) => console.warn(`[aifilter] 紀錄訊息發送失敗: ${err.message}`));
+  };
+  const logContent = await resolveMentions(message.guild, raw).catch(() => raw);
+  await channel.send({ ...logContent, allowedMentions: { parse: [] } }).catch((err) => console.warn(`[aifilter] 紀錄訊息發送失敗: ${err.message}`));
 }
 
 /**
@@ -631,7 +633,8 @@ async function punishStrike(message, settings, count) {
   await message.channel.send({ content: text, allowedMentions: { users: [userId] } })
     .catch((err) => console.warn(`[aifilter] 警告發送失敗: ${err.message}`));
   const log = await logChannelOf(message.guild, settings);
-  await log?.send({ content: `${text}\n<#${message.channel.id}>`, allowedMentions: { parse: [] } })
+  const logText = { content: `${text}\n<#${message.channel.id}>` };
+  if (log) await log.send({ ...(await resolveMentions(message.guild, logText).catch(() => logText)), allowedMentions: { parse: [] } })
     .catch((err) => console.warn(`[aifilter] 警告紀錄發送失敗: ${err.message}`));
 }
 

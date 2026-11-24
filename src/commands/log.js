@@ -9,7 +9,7 @@ import {
   modlogStats, deletedMessagePayloads, postToChannel, missingPostPerms, removeAttachmentFiles, clip,
 } from '../lib/modlog.js';
 import { num } from '../lib/format.js';
-import { withResolvableMentions } from '../lib/mentions.js';
+import { replyResolved, resolveMentions, resolveUsers } from '../lib/mentions.js';
 
 const POST_CHANNEL_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.PublicThread, ChannelType.PrivateThread];
 
@@ -233,7 +233,7 @@ async function suspects(interaction, guildId) {
   } else {
     embed.setDescription(rows.map((r, i) => {
       const flag = r.awarded >= 3 ? ' ⚠️' : '';
-      return `**${i + 1}.** <@${r.author_id}>${r.author_tag ? `（${r.author_tag}）` : ''} \`${r.author_id}\`${flag}　自刪 **${r.deletes}** 則\n` +
+      return `**${i + 1}.** <@${r.author_id}> \`${r.author_id}\`${flag}　自刪 **${r.deletes}** 則\n` +
         `　入帳後刪 ${r.awarded} 則（+${num(r.xp ?? 0)} XP）・排隊中刪 ${r.cancelled} 則・⚡ ${r.quick} 則・` +
         `最近 <t:${Math.floor(r.last_deleted_at / 1000)}:R>`;
     }).join('\n'));
@@ -241,7 +241,7 @@ async function suspects(interaction, guildId) {
   }
   if (!getModlog(guildId).enabled) embed.addFields({ name: '⚠️', value: '紀錄目前是關的，只會統計開啟期間的資料。' });
 
-  if (!to) return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  if (!to) return replyResolved(interaction, { embeds: [embed] });
   await postToChannel(to, [{ embeds: [embed] }]);
   return reply(interaction, `✅ 已發到 <#${to.id}>。`);
 }
@@ -342,7 +342,7 @@ function view(interaction, guildId) {
   if (!me.permissions.has(PermissionFlagsBits.ViewAuditLog)) {
     embed.addFields({ name: '⚠️ 權限', value: 'Bot 沒有「檢視審核紀錄」：分不出本人刪除還是管理員刪除。' });
   }
-  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { embeds: [embed] });
 }
 
 function reply(interaction, content) {

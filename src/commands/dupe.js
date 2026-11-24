@@ -12,7 +12,7 @@ import {
   DEFAULT_DELETE_MESSAGE, renderEmojis,
 } from '../lib/dupe.js';
 import { num } from '../lib/format.js';
-import { withResolvableMentions } from '../lib/mentions.js';
+import { replyResolved, resolveMentions, resolveUsers } from '../lib/mentions.js';
 
 const ACTION_LABEL = { delete: '刪除重複訊息', warn: '只提示不刪', off: '停用' };
 
@@ -199,7 +199,7 @@ function view(interaction, guildId) {
     .setDescription(lines.join('\n\n'))
     .addFields({ name: '不列入去重的網域', value: ignored.length ? ignored.map((d) => `\`${d}\``).join('、') : '（無）' })
     .setFooter({ text: `本次啟動以來：新記 ${num(dupeStats.recorded)} · 攔到重複 ${num(dupeStats.duplicates)} · 刪除 ${num(dupeStats.deleted)} · 連帶預覽 ${num(dupeStats.previews)} · 失敗 ${num(dupeStats.failed)}` });
-  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { embeds: [embed] });
 }
 
 function mode(interaction, guildId) {

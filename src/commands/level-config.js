@@ -12,7 +12,7 @@ import {
 } from '../lib/db.js';
 import { num } from '../lib/format.js';
 import { stats, pendingSize } from '../lib/xp.js';
-import { withResolvableMentions } from '../lib/mentions.js';
+import { replyResolved, resolveMentions, resolveUsers } from '../lib/mentions.js';
 
 const IGNORABLE_CHANNELS = [
   ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum,
@@ -533,5 +533,5 @@ async function viewConfig(interaction) {
     embed.addFields({ name: '⚠️ 需要處理', value: problems.join('\n') });
   }
 
-  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { embeds: [embed] });
 }

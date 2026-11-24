@@ -1,6 +1,7 @@
 import { MessageType, PermissionFlagsBits } from 'discord.js';
 import { db, getModlog } from './db.js';
 import { fetchHistory } from './dupe.js';
+import { resolveMentions } from './mentions.js';
 
 // 反覆進出伺服器的調查與自動處理。
 // Discord 不提供過去的進出紀錄，所以資料從三處來：
@@ -229,7 +230,7 @@ async function notify(guild, settings, content) {
   }
   const channel = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
   if (!channel?.isTextBased?.()) return;
-  await channel.send({ content, allowedMentions: { parse: [] } })
+  await channel.send({ ...(await resolveMentions(guild, { content }).catch(() => ({ content }))), allowedMentions: { parse: [] } })
     .catch((err) => console.warn(`[rejoin] 通知發送失敗: ${err.message}`));
 }
 
