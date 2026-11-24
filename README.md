@@ -54,6 +54,7 @@ sudo docker logs -f discord-leveling-bot
    或用含該權限的邀請連結重新授權一次（`permissions=2416045056`）。
    要用 `/log` 分辨「本人刪的」還是「管理員刪的」，再加 **View Audit Log**（檢視審核紀錄），
    或用 `permissions=2416045184`（含 Manage Messages 與 View Audit Log）重新授權。
+   要用 `/rejoin` 自動封禁反覆進出的人，再加 **Ban Members**（封鎖成員），或用 `permissions=2416045188` 重新授權。
 3. **把 Bot 的角色拖到所有等級獎勵角色之上。** Discord 只允許 Bot 管理比自己低的角色，
    這是等級角色最常見的失敗原因。`/level-config view` 會直接標出哪幾級會失敗。
 
@@ -72,6 +73,7 @@ sudo docker logs -f discord-leveling-bot
 | `/trigger …` | Manage Server | 關鍵字自動回應（貼圖／轉發連結），見下 |
 | `/dupe …` | Manage Server | 分區連結去重：同一區貼過的連結再貼就刪，見下 |
 | `/ai-filter …` | Manage Server | 指定頻道過濾 pixiv／X 的 AI 創作者連結與 tag，見下 |
+| `/rejoin …` | Ban Members | 調查反覆進出伺服器的人，可設定同一個 UID 加入達到次數就通知或自動封禁，見下 |
 | `/log …` | Manage Server | 活動日誌與刪除訊息紀錄；把已刪除的訊息發到指定頻道，找出拿完 XP 就刪的人，見下 |
 
 ### `/level-config` 子指令
@@ -473,6 +475,48 @@ Bot 不會自動扣分，判斷交給管理員。
 - 編輯紀錄只在**內容真的改了**才記（Discord 補連結預覽也會觸發編輯事件，那種不算）。
 - 封鎖／解封事件需要 `GuildModeration` intent（非特權，Portal 不用開，程式已宣告）。
 
+## 反覆進出調查（`/rejoin`，Owner 追加）
+
+找出一直退群又回來的人，並可選擇讓同一個 UID 在一段時間內加入達到某個次數時自動通知或封禁。
+預設**只記錄、不處理**。
+
+```
+/rejoin scan                                   ← 把過去的加入補進紀錄（只記錄，不封禁）
+/rejoin list days:30 min-joins:2               ← 30 天內加入 2 次以上的人
+/rejoin user user:@某人                         ← 某人的進出時間線（已離開的人可以貼 UID）
+/rejoin auto action:自動封禁 threshold:3 days:7  ← 7 天內第 3 次加入就封禁
+/rejoin auto action:只通知 threshold:3 days:7    ← 先觀察：達標只發通知
+/rejoin enforce                                ← 預覽已經達標、會被封禁的人
+/rejoin enforce confirm:true                   ← 真的封禁（不在伺服器裡的 UID 也封得到）
+/rejoin exempt action:add user:@某人             ← 豁免名單
+/rejoin log-channel channel:#mod-log           ← 通知頻道；不設就用 /log 的活動日誌頻道
+/rejoin view
+```
+
+### 紀錄從哪裡來
+
+Discord 不提供過去的進出紀錄，所以資料來源有四個：
+
+| 來源 | 內容 |
+|---|---|
+| Bot 即時 | 這個功能上線之後，Bot 收到的每一次加入／離開 |
+| 系統訊息 | 系統頻道裡「某某加入了伺服器」的訊息（`/rejoin scan`，可用 `channel:` 指定頻道）。**只有加入，沒有離開** |
+| 活動日誌 | `/log` 有開的話，它已存的加入／離開事件 |
+| 目前成員 | 每位現有成員最近一次的加入時間 |
+
+- **不同來源**在 2 分鐘內看到同一人的同一種事件算同一次，重複掃描也不會重複計數。
+- **同一來源**的事件各算各的，所以秒進秒退的洗版會一次一次算進去。
+- 伺服器關掉了系統加入訊息、或 Bot 離線時的進出，就沒有紀錄可補。
+
+### 自動處理
+
+- 只看**加入次數**（含觸發的這一次），統計期間是最近 `days` 天。
+- `只通知`：達標時發一則通知，不處理。`自動封禁`：達標當下封禁；`delete-messages` 可順便刪掉他最近幾小時的訊息。
+- **只對設定之後的加入生效**。已經達標的人用 `/rejoin enforce` 補處理：先預覽，加 `confirm:true` 才執行，一次最多 50 人，已經被這個功能封禁過的不會重複列出。
+- 豁免名單上的人和 Bot 永遠不會被處理。
+- 需要 Bot 有**封鎖成員**權限；對方的角色高於或等於 Bot 時會封禁失敗，並在通知裡寫明原因。
+- 指令預設只有「封鎖成員」權限的人看得到。
+
 ## 規則（預設值 = MEE6）
 
 - 每則有效訊息隨機 **15–25 XP**，同一人 **60 秒冷卻**（per-user，不是全服一把鎖）。
@@ -511,6 +555,8 @@ v1.2 新增 `guild_settings.media_bonus_xp` 與 `media_bonus_channels` 表。
 
 AI 過濾新增 `ai_filter_settings`／`ai_filter_channels`／`ai_filter_creators`／`ai_filter_keywords` 四張表
 （同樣開機自動建）。預設關鍵字第一次用到時寫入，記在 `schema_meta` 的 `ai-keywords-seed:<guild_id>`，之後自己刪掉不會被塞回來。
+
+反覆進出新增 `member_movements`／`rejoin_settings`／`rejoin_exempt`／`rejoin_actions` 四張表（開機自動建）。
 
 活動日誌新增 `modlog_settings`／`modlog_ignored_channels`／`modlog_messages`／`modlog_events` 四張表
 （同樣開機自動建）。`modlog_messages` 存訊息內容，只有 `/log enable` 過的伺服器才會寫入，超過保存天數自動刪除。
