@@ -192,11 +192,35 @@ CREATE TABLE IF NOT EXISTS ai_filter_keywords (
   PRIMARY KEY (guild_id, keyword)
 );
 
--- 每位使用者因 AI 過濾被刪除的次數（累計，管理員可重設）
+-- 每位使用者因 AI 過濾被刪除的次數（累計，管理員可重設）。
+-- 現在只當「逐筆紀錄上線前」的舊次數；新的刪除寫進 ai_filter_strike_log
 CREATE TABLE IF NOT EXISTS ai_filter_strikes (
   guild_id TEXT NOT NULL,
   user_id  TEXT NOT NULL,
   count    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, user_id)
+);
+
+-- 逐筆刪除紀錄：哪則訊息、因哪位創作者。誤判（放行該創作者、撤銷該則）時 voided_at 有值，不算次數
+CREATE TABLE IF NOT EXISTS ai_filter_strike_log (
+  guild_id    TEXT    NOT NULL,
+  user_id     TEXT    NOT NULL,
+  message_id  TEXT    NOT NULL,
+  creator     TEXT,
+  reason      TEXT,
+  created_at  INTEGER NOT NULL,
+  voided_at   INTEGER,
+  void_reason TEXT,
+  PRIMARY KEY (guild_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_strike_log_user ON ai_filter_strike_log (guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_ai_strike_log_creator ON ai_filter_strike_log (guild_id, creator);
+
+-- AI 過濾自己禁言的人與到期時間。誤判撤銷後低於門檻時，只解除這裡記得的禁言
+CREATE TABLE IF NOT EXISTS ai_filter_mutes (
+  guild_id TEXT    NOT NULL,
+  user_id  TEXT    NOT NULL,
+  until    INTEGER NOT NULL,
   PRIMARY KEY (guild_id, user_id)
 );
 
@@ -1065,20 +1089,87 @@ const bumpAiStrike = db.prepare(
   + 'ON CONFLICT(guild_id, user_id) DO UPDATE SET count = count + 1'
 );
 const readAiStrike = db.prepare('SELECT count FROM ai_filter_strikes WHERE guild_id = ? AND user_id = ?');
+const insStrikeLog = db.prepare(`INSERT OR IGNORE INTO ai_filter_strike_log
+  (guild_id, user_id, message_id, creator, reason, created_at, voided_at, void_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+const countStrikeLog = db.prepare(
+  'SELECT COUNT(*) AS n FROM ai_filter_strike_log WHERE guild_id = ? AND user_id = ? AND voided_at IS NULL');
 
-/** 記一次刪除，回傳累計次數 */
-export function addAiFilterStrike(guildId, userId) {
-  bumpAiStrike.run(guildId, userId);
+/**
+ * 記一次刪除，回傳累計次數。有 messageId 就逐筆記（同一則重複掃到不會算兩次），
+ * creator 是判定命中的創作者，之後放行這位創作者時可以把這筆作廢。
+ */
+export function addAiFilterStrike(guildId, userId, { messageId = null, creator = null, reason = null } = {}) {
+  if (messageId) insStrikeLog.run(guildId, userId, messageId, creator, reason, now(), null, null);
+  else bumpAiStrike.run(guildId, userId);
   return readAiFilterStrike(guildId, userId);
 }
 
+/** 有效次數 = 舊的累計數字 + 沒作廢的逐筆紀錄 */
 export function readAiFilterStrike(guildId, userId) {
-  return readAiStrike.get(guildId, userId)?.count ?? 0;
+  return (readAiStrike.get(guildId, userId)?.count ?? 0) + countStrikeLog.get(guildId, userId).n;
 }
 
 export function resetAiFilterStrike(guildId, userId) {
-  return db.prepare('DELETE FROM ai_filter_strikes WHERE guild_id = ? AND user_id = ?')
-    .run(guildId, userId).changes > 0;
+  const legacy = db.prepare('DELETE FROM ai_filter_strikes WHERE guild_id = ? AND user_id = ?').run(guildId, userId).changes;
+  const logged = db.prepare(`UPDATE ai_filter_strike_log SET voided_at = ?, void_reason = 'reset'
+    WHERE guild_id = ? AND user_id = ? AND voided_at IS NULL`).run(now(), guildId, userId).changes;
+  return legacy + logged > 0;
+}
+
+/** 這位使用者沒作廢的刪除紀錄，新的在前 */
+export function listAiFilterStrikes(guildId, userId, limit = 10) {
+  return db.prepare(`SELECT * FROM ai_filter_strike_log WHERE guild_id = ? AND user_id = ? AND voided_at IS NULL
+    ORDER BY created_at DESC LIMIT ?`).all(guildId, userId, limit);
+}
+
+/** 作廢因某位創作者而記的刪除次數。回傳 [{ userId, voided }] */
+export function voidAiFilterStrikesByCreator(guildId, creator, voidReason) {
+  const rows = db.prepare(`SELECT user_id, COUNT(*) AS n FROM ai_filter_strike_log
+    WHERE guild_id = ? AND creator = ? AND voided_at IS NULL GROUP BY user_id`).all(guildId, creator);
+  db.prepare(`UPDATE ai_filter_strike_log SET voided_at = ?, void_reason = ?
+    WHERE guild_id = ? AND creator = ? AND voided_at IS NULL`).run(now(), voidReason, guildId, creator);
+  return rows.map((r) => ({ userId: r.user_id, voided: r.n }));
+}
+
+/** 作廢某一則訊息的刪除次數。回傳被作廢那筆的 user_id，沒有就 null */
+export function voidAiFilterStrikeByMessage(guildId, messageId, voidReason) {
+  const row = db.prepare(`SELECT user_id FROM ai_filter_strike_log
+    WHERE guild_id = ? AND message_id = ? AND voided_at IS NULL`).get(guildId, messageId);
+  if (!row) return null;
+  db.prepare('UPDATE ai_filter_strike_log SET voided_at = ?, void_reason = ? WHERE guild_id = ? AND message_id = ?')
+    .run(now(), voidReason, guildId, messageId);
+  return row.user_id;
+}
+
+/**
+ * 逐筆紀錄上線前被刪的訊息：從舊的累計數字扣回一次，並寫一筆已作廢的紀錄當記號，
+ * 同一則重複放行不會扣兩次。回傳 true 表示這次有扣。
+ */
+export function voidLegacyAiFilterStrike(guildId, userId, messageId, creator, voidReason) {
+  const legacy = readAiStrike.get(guildId, userId)?.count ?? 0;
+  if (legacy <= 0) return false;
+  const t = now();
+  if (insStrikeLog.run(guildId, userId, messageId, creator, 'legacy', t, t, voidReason).changes === 0) return false;
+  db.prepare('UPDATE ai_filter_strikes SET count = count - 1 WHERE guild_id = ? AND user_id = ? AND count > 0').run(guildId, userId);
+  return true;
+}
+
+/** 因 AI 過濾被刪、而且活動日誌有內容快照的訊息（找舊次數對應的創作者用） */
+export function listModlogAiFilterDeletions(guildId) {
+  return db.prepare(`SELECT message_id, author_id, content FROM modlog_messages
+    WHERE guild_id = ? AND delete_reason = 'ai-filter' AND author_id IS NOT NULL`).all(guildId);
+}
+
+export function recordAiFilterMute(guildId, userId, until) {
+  db.prepare('INSERT OR REPLACE INTO ai_filter_mutes (guild_id, user_id, until) VALUES (?, ?, ?)').run(guildId, userId, until);
+}
+
+export function getAiFilterMute(guildId, userId) {
+  return db.prepare('SELECT until FROM ai_filter_mutes WHERE guild_id = ? AND user_id = ?').get(guildId, userId)?.until ?? null;
+}
+
+export function clearAiFilterMute(guildId, userId) {
+  db.prepare('DELETE FROM ai_filter_mutes WHERE guild_id = ? AND user_id = ?').run(guildId, userId);
 }
 
 export function closeDb() {

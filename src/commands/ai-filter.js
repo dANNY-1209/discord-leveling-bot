@@ -6,11 +6,11 @@ import {
   listAiFilterChannels, addAiFilterChannel, removeAiFilterChannel,
   listAiFilterCreators, setAiFilterCreator, removeAiFilterCreator,
   listAiFilterKeywords, addAiFilterKeyword, removeAiFilterKeyword,
-  readAiFilterStrike, resetAiFilterStrike,
+  readAiFilterStrike, resetAiFilterStrike, listAiFilterStrikes,
 } from '../lib/db.js';
 import {
   aiFilterStats, evaluateTarget, evaluateText, linkedCreators, parseTarget,
-  scanGuild, STRIKE_MUTE_AT, STRIKE_WARN_AT,
+  scanGuild, STRIKE_MUTE_AT, STRIKE_WARN_AT, pardonCreator, pardonMessage,
 } from '../lib/aifilter.js';
 import { num } from '../lib/format.js';
 
@@ -70,12 +70,14 @@ export const data = new SlashCommandBuilder()
     .addIntegerOption((o) => o.setName('limit').setDescription('每個頻道往回掃幾則（預設 100）')
       .setMinValue(10).setMaxValue(500)))
   .addSubcommand((s) => s
-    .setName('strikes').setDescription('查看或重設某位使用者的 AI 過濾刪除次數')
-    .addUserOption((o) => o.setName('user').setDescription('要查的使用者').setRequired(true))
+    .setName('strikes').setDescription('查看、重設或撤銷 AI 過濾刪除次數（誤判不算警告／禁言）')
+    .addUserOption((o) => o.setName('user').setDescription('要查的使用者；撤銷單則時可留空'))
     .addStringOption((o) => o.setName('action').setDescription('預設只查看').addChoices(
       { name: '查看', value: 'view' },
+      { name: '撤銷某一則（誤判，填 message-id）', value: 'void' },
       { name: '重設為 0（誤判或已處理時用）', value: 'reset' },
-    )));
+    ))
+    .addStringOption((o) => o.setName('message-id').setDescription('被誤刪那則訊息的 ID（查看時會列出）')));
 
 export async function execute(interaction) {
   const guildId = interaction.guildId;
@@ -116,6 +118,14 @@ async function scan(interaction, guildId) {
 async function strikes(interaction, guildId) {
   const user = interaction.options.getUser('user');
   const action = interaction.options.getString('action') ?? 'view';
+  if (action === 'void') {
+    const messageId = interaction.options.getString('message-id')?.trim();
+    if (!messageId || !/^\d{15,25}$/.test(messageId)) return reply(interaction, '⚠️ 要填 `message-id`（被誤刪那則訊息的 ID，用 `/ai-filter strikes user:@某人` 查得到）。');
+    const result = await pardonMessage(interaction.guild, messageId);
+    if (!result) return reply(interaction, `找不到訊息 \`${messageId}\` 的有效刪除紀錄（可能已撤銷，或是逐筆紀錄上線前刪的，那種請用「重設為 0」）。`);
+    return reply(interaction, `✅ 已撤銷：<@${result.userId}> 現在是 **${result.count}** 次。${result.unmuted ? '已低於門檻，解除 AI 過濾的禁言。' : ''}`);
+  }
+  if (!user) return reply(interaction, '⚠️ 要指定 `user`。');
   if (action === 'reset') {
     const had = resetAiFilterStrike(guildId, user.id);
     return reply(interaction, had ? `✅ <@${user.id}> 的刪除次數已重設為 0。` : `<@${user.id}> 本來就是 0 次。`);
@@ -124,7 +134,13 @@ async function strikes(interaction, guildId) {
   const next = count >= STRIKE_MUTE_AT ? '已達禁言門檻（再被刪仍會禁言 1 天）'
     : count >= STRIKE_WARN_AT ? `已達警告門檻，再累積到 ${STRIKE_MUTE_AT} 次會禁言 1 天`
       : `還沒到警告門檻（${STRIKE_WARN_AT} 次）`;
-  return reply(interaction, `<@${user.id}> 因 AI 過濾被刪除 **${count}** 次：${next}。`);
+  const recent = listAiFilterStrikes(guildId, user.id, 8).map((r) =>
+    `・<t:${Math.floor(r.created_at / 1000)}:R> \`${r.message_id}\`${r.creator ? ` \`${r.creator}\`` : ''}${r.reason ? `：${r.reason.slice(0, 80)}` : ''}`);
+  const lines = [`<@${user.id}> 因 AI 過濾被刪除 **${count}** 次：${next}。`];
+  if (recent.length) {
+    lines.push('最近幾次（誤判時：放行該創作者，或 `action:撤銷某一則 message-id:<ID>`）：', ...recent);
+  }
+  return reply(interaction, lines.join('\n'));
 }
 
 function watch(interaction, guildId) {
@@ -220,7 +236,17 @@ async function creator(interaction, guildId) {
   }
   setAiFilterCreator(guildId, id, action);
   if (action === 'allow') {
-    return interaction.editReply(`✅ 已放行 \`${id}\`：不再因這位作者或其作品被判定。`);
+    // 放行 = 承認之前是誤判：因這位創作者被刪的次數全部作廢，不算警告／禁言
+    const pardon = await pardonCreator(interaction.guild, id);
+    const lines = [`✅ 已放行 \`${id}\`：不再因這位作者或其作品被判定。`];
+    if (pardon.total > 0) {
+      lines.push(`之前因這位創作者被刪的 **${pardon.total}** 次已作廢，不算警告／禁言次數：`);
+      for (const u of pardon.users.slice(0, 15)) {
+        lines.push(`・<@${u.userId}> −${u.voided}，現在 ${u.count} 次${u.unmuted ? '（已解除禁言）' : ''}`);
+      }
+      if (pardon.users.length > 15) lines.push(`…還有 ${pardon.users.length - 15} 位`);
+    }
+    return interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
   }
 
   // 同一人的 Patreon 與標明的小號一起封，已被放行的不動
