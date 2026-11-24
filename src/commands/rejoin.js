@@ -6,7 +6,7 @@ import {
   scanMovements, enforceRejoin, setRejoinExempt, listRejoinExempt, rejoinStats, ENFORCE_CAP,
 } from '../lib/rejoin.js';
 import { num } from '../lib/format.js';
-import { withResolvableMentions } from '../lib/mentions.js';
+import { replyResolved, resolveMentions, resolveUsers } from '../lib/mentions.js';
 
 const ACTION_LABEL = { off: '只記錄（不處理）', notify: '達標發通知', ban: '達標自動封禁' };
 const SOURCE_LABEL = { live: 'Bot 即時', system: '系統訊息', modlog: '活動日誌', member: '目前成員' };
@@ -86,7 +86,8 @@ async function scan(interaction) {
   return interaction.editReply(lines.join('\n'));
 }
 
-function list(interaction, guildId) {
+async function list(interaction, guildId) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const days = interaction.options.getInteger('days') ?? 30;
   const minJoins = interaction.options.getInteger('min-joins') ?? 2;
   const since = days > 0 ? Date.now() - days * 86_400_000 : 0;
@@ -99,21 +100,23 @@ function list(interaction, guildId) {
   if (rows.length === 0) {
     embed.setDescription('沒有符合條件的人。還沒掃過的話先跑 `/rejoin scan` 把過去的加入補進來。');
   } else {
-    const inGuild = interaction.guild.members.cache;
+    // members.cache 只有 Bot 看過的人，要實際向 Discord 查才知道還在不在
+    const users = await resolveUsers(interaction.guild, rows.map((r) => r.user_id));
     embed.setDescription(rows.map((r, i) => {
+      const status = users.get(r.user_id)?.inGuild;
       const flags = [
-        inGuild.has(r.user_id) ? '在伺服器' : '已離開',
+        status === true ? '在伺服器' : status === false ? '已離開' : '狀態未知',
         r.last_action === 'ban' ? '⛔ 已封禁' : r.last_action === 'notify' ? '🔔 已通知' : null,
         r.exempt ? '🛡️ 豁免' : null,
       ].filter(Boolean).join('・');
-      return `**${i + 1}.** <@${r.user_id}> \`${r.user_id}\`${r.user_tag ? `（${r.user_tag}）` : ''}\n` +
+      return `**${i + 1}.** <@${r.user_id}> \`${r.user_id}\`\n` +
         `　加入 **${r.joins}** 次・離開 ${r.leaves} 次・最近 ${ts(r.last_at, 'R')}・${flags}`;
     }).join('\n').slice(0, 4000));
   }
-  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { embeds: [embed] });
 }
 
-function user(interaction, guildId) {
+async function user(interaction, guildId) {
   const target = interaction.options.getUser('user');
   const events = userTimeline(guildId, target.id, 30);
   const settings = getRejoinSettings(guildId);
@@ -125,7 +128,7 @@ function user(interaction, guildId) {
   for (const e of events) {
     lines.push(`${e.type === 'join' ? '📥 加入' : '📤 離開'} ${ts(e.at)}（${ts(e.at, 'R')}）・${SOURCE_LABEL[e.source] ?? e.source}`);
   }
-  return reply(interaction, lines.join('\n').slice(0, 1900));
+  return replyResolved(interaction, { content: lines.join('\n').slice(0, 1900) });
 }
 
 function auto(interaction, guildId) {
@@ -165,7 +168,7 @@ async function enforce(interaction) {
   if (r.candidates.length === 0) return interaction.editReply(`沒有符合條件的人（${header}）。`);
   if (!confirm) {
     const preview = r.candidates.slice(0, 20).map((c) => `・<@${c.user_id}> \`${c.user_id}\`${c.user_tag ? `（${c.user_tag}）` : ''} 加入 ${c.joins} 次`);
-    return interaction.editReply({
+    return replyResolved(interaction, {
       content: [`🔍 預覽：**${r.candidates.length}** 人會被封禁（${header}）：`, ...preview,
         r.candidates.length > 20 ? `…還有 ${r.candidates.length - 20} 人` : '',
         `確認後加 \`confirm:true\` 執行（一次最多 ${ENFORCE_CAP} 人）。`].filter(Boolean).join('\n'),
@@ -175,7 +178,7 @@ async function enforce(interaction) {
   const lines = [`⛔ 已封禁 **${r.banned.length}** 人（${header}）。`];
   if (r.failed.length) lines.push(`失敗 ${r.failed.length} 人：${r.failed.slice(0, 5).map((f) => `<@${f.userId}>（${f.error}）`).join('、')}`);
   if (r.capped) lines.push(`達到單次上限 ${ENFORCE_CAP} 人，再跑一次處理剩下的。`);
-  return interaction.editReply({ content: lines.join('\n'), allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { content: lines.join('\n') });
 }
 
 function exempt(interaction, guildId) {
@@ -207,7 +210,7 @@ function view(interaction, guildId) {
       { name: '豁免', value: `${listRejoinExempt(guildId).length} 人`, inline: true },
       { name: '本次啟動以來', value: `加入 ${num(rejoinStats.joins)}・離開 ${num(rejoinStats.leaves)}・通知 ${num(rejoinStats.notified)}・封禁 ${num(rejoinStats.banned)}（失敗 ${num(rejoinStats.banFailed)}）` },
     );
-  return interaction.reply({ ...withResolvableMentions({ embeds: [embed] }), flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+  return replyResolved(interaction, { embeds: [embed] });
 }
 
 function reply(interaction, content) {

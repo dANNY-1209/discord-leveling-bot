@@ -6,7 +6,7 @@ import {
   saveModlogMessage, getModlogMessage, updateModlogMessageContent, markModlogDeleted,
   addModlogEvent, pruneModlog, countReactionAwardsForMessage, getMember,
 } from './db.js';
-import { withResolvableMentions } from './mentions.js';
+import { resolveMentions } from './mentions.js';
 
 // 活動日誌／刪除訊息紀錄。預設關閉；/log enable 之後才開始存訊息快照。
 // 刪除事件只帶 message.id（訊息不在快取、Bot 重啟過時內容是空的），所以收訊時先把內容存進 DB。
@@ -415,9 +415,7 @@ function deletedEmbed(guild, row) {
     .setAuthor({ name: `${row.author_tag ?? '未知使用者'} 的訊息被刪除` })
     .setDescription(content)
     .addFields(
-      { name: '作者', value: row.author_id ? `<@${row.author_id}>${row.author_tag ? `
-${row.author_tag}` : ''}
-\`${row.author_id}\`` : '未知', inline: true },
+      { name: '作者', value: row.author_id ? `<@${row.author_id}>\n\`${row.author_id}\`` : '未知', inline: true },
       { name: '頻道', value: `<#${row.channel_id}>`, inline: true },
       { name: '刪除者', value: deleteSourceText(row, guild), inline: true },
       { name: '發送時間', value: createdAt ? `<t:${createdAt}:f>` : '未知', inline: true },
@@ -449,7 +447,7 @@ export function deletedMessagePayloads(guild, rows) {
     const files = (row.attachments ?? []).filter((a) => a.file).map((a) => new AttachmentBuilder(a.file, { name: a.name }));
     if (files.length) { flush(); payloads.push({ embeds: [embed], files }); continue; }
     const len = embed.length;
-    if (batch.length >= 10 || size + len > 5800) flush();
+    if (batch.length >= 10 || size + len > 5000) flush(); // 留空間給換成名字後變長的文字
     batch.push(embed);
     size += len;
   }
@@ -484,7 +482,8 @@ export async function postToChannel(channel, payloads) {
   let sent = 0;
   for (const p of payloads) {
     try {
-      await channel.send({ ...withResolvableMentions(p), allowedMentions: { parse: [] } });
+      const resolved = await resolveMentions(channel.guild, p).catch(() => p);
+      await channel.send({ ...resolved, allowedMentions: { parse: [] } });
       sent++;
       modlogStats.posted++;
     } catch (err) {
